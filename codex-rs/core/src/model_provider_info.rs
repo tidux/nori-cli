@@ -34,12 +34,12 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WireApi {
-    /// The Responses API exposed by OpenAI at `/v1/responses`.
-    Responses,
-
-    /// Regular Chat Completions compatible with `/v1/chat/completions`.
-    #[default]
+    /// The OpenAI Chat Completions API. This is the default.
     Chat,
+    /// The OpenAI Responses API. This is used by some internal models.
+    Responses,
+    /// The Agent Context Protocol. This is used by ACP-compliant agent subprocesses.
+    Acp,
 }
 
 /// Serializable representation of a provider definition.
@@ -309,6 +309,7 @@ pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 pub const BUILT_IN_OSS_MODEL_PROVIDER_ID: &str = "oss";
 pub const GEMINI_ACP_PROVIDER_ID: &str = "gemini-acp";
+pub const MOCK_ACP_PROVIDER_ID: &str = "mock-acp";
 
 /// Built-in default provider list.
 pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
@@ -378,6 +379,27 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
         (
             LMSTUDIO_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses),
+        ),
+        // Mock ACP provider subprocess
+        (
+            MOCK_ACP_PROVIDER_ID,
+            P {
+                name: "Mock ACP".into(),
+                // ACP agents communicate via subprocess, not HTTP
+                base_url: None,
+                env_key: None,
+                env_key_instructions: None,
+                experimental_bearer_token: None,
+                // ACP uses its own protocol, not HTTP-based wire APIs
+                wire_api: WireApi::Chat,
+                query_params: None,
+                http_headers: None,
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_max_retries: None,
+                stream_idle_timeout_ms: None,
+                requires_openai_auth: false,
+            },
         ),
         // Gemini ACP provider for Gemini CLI agents via subprocess
         (

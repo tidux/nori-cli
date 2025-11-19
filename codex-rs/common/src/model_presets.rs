@@ -43,6 +43,29 @@ pub struct ModelPreset {
 static PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
     vec![
         ModelPreset {
+            id: "mock-acp-agent",
+            model: "mock-acp-agent",
+            display_name: "Mock ACP Agent",
+            description: "Mock agent for testing purposes.",
+            default_reasoning_effort: ReasoningEffort::Medium,
+            supported_reasoning_efforts: &[ReasoningEffortPreset {
+                effort: ReasoningEffort::Medium,
+                description: "Standard mock behavior",
+            }],
+            is_default: false,
+            upgrade: None,
+        },
+        ModelPreset {
+            id: "gemini-2.0-flash-thinking-exp",
+            model: "gemini-2.0-flash-thinking-exp",
+            display_name: "Gemini 2.0 Flash Thinking",
+            description: "Google's experimental thinking model.",
+            default_reasoning_effort: ReasoningEffort::Medium,
+            supported_reasoning_efforts: &[],
+            is_default: false,
+            upgrade: None,
+        },
+        ModelPreset {
             id: "gpt-5.1-codex",
             model: "gpt-5.1-codex",
             display_name: "gpt-5.1-codex",

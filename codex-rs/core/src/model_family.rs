@@ -121,6 +121,11 @@ pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
             needs_special_apply_patch_instructions: true,
             shell_type: ConfigShellToolType::Local,
         )
+    } else if slug.starts_with("gemini") {
+        model_family!(
+            slug, "gemini",
+            supports_parallel_tool_calls: true,
+        )
     } else if slug.starts_with("gpt-4.1") {
         model_family!(
             slug, "gpt-4.1",
