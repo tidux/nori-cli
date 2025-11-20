@@ -193,6 +193,7 @@ impl ModelClient {
 
                 Ok(ResponseStream { rx_event: rx })
             }
+            WireApi::Acp => todo!(),
         }
     }
 

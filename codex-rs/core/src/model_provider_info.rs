@@ -35,6 +35,7 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 #[serde(rename_all = "lowercase")]
 pub enum WireApi {
     /// The OpenAI Chat Completions API. This is the default.
+    #[default]
     Chat,
     /// The OpenAI Responses API. This is used by some internal models.
     Responses,
@@ -202,6 +203,7 @@ impl ModelProviderInfo {
         match self.wire_api {
             WireApi::Responses => format!("{base_url}/responses{query_string}"),
             WireApi::Chat => format!("{base_url}/chat/completions{query_string}"),
+            WireApi::Acp => todo!(),
         }
     }
 
