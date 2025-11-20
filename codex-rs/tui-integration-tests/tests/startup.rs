@@ -1,11 +1,19 @@
-use std::time::Duration;
-use tui_integration_tests::TuiSession;
+use std::time::{Duration, Instant};
+use tui_integration_tests::{SessionConfig, TuiSession};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 #[test]
-fn test_startup_shows_prompt() {
-    let mut session = TuiSession::spawn(24, 80).expect("Failed to spawn codex");
+fn test_startup_shows_welcome() {
+    let mut session = TuiSession::spawn_with_config(
+        24,
+        80,
+        SessionConfig::default()
+            // Don't include the values that would bypass welcome
+            .without_approval_policy()
+            .without_sandbox(),
+    )
+    .expect("Failed to spawn codex");
 
     session
         .wait_for_text("Welcome", TIMEOUT)
@@ -17,8 +25,16 @@ fn test_startup_shows_prompt() {
 }
 
 #[test]
-fn test_startup_with_dimensions() {
-    let mut session = TuiSession::spawn(40, 120).expect("Failed to spawn codex");
+fn test_startup_welcome_with_dimensions() {
+    let mut session = TuiSession::spawn_with_config(
+        40,
+        120,
+        SessionConfig::default()
+            // Don't include the values that would bypass welcome
+            .without_approval_policy()
+            .without_sandbox(),
+    )
+    .expect("Failed to spawn codex");
 
     session
         .wait_for_text("Welcome", TIMEOUT)
@@ -31,7 +47,15 @@ fn test_startup_with_dimensions() {
 
 #[test]
 fn test_runs_in_temp_directory_by_default() {
-    let mut session = TuiSession::spawn(24, 80).expect("Failed to spawn codex");
+    let mut session = TuiSession::spawn_with_config(
+        24,
+        80,
+        SessionConfig::default()
+            // Don't include the values that would bypass welcome
+            .without_approval_policy()
+            .without_sandbox(),
+    )
+    .expect("Failed to spawn codex");
 
     session
         .wait_for_text("Welcome", TIMEOUT)
@@ -51,5 +75,70 @@ fn test_runs_in_temp_directory_by_default() {
         !contents.contains("/home/"),
         "Session should not run in home directory, but got: {}",
         contents
+    );
+}
+
+#[test]
+fn test_trust_screen_is_skipped_with_default_config() {
+    let mut session = TuiSession::spawn(24, 80).expect("Failed to spawn codex");
+
+    // Wait for the prompt to appear (indicated by the chevron character)
+    session
+        .wait_for_text("›", TIMEOUT)
+        .expect("Prompt did not appear");
+
+    let contents = session.screen_contents();
+
+    // Should NOT show the trust directory approval screen
+    assert!(
+        !contents.contains("Since this folder is not version controlled"),
+        "Trust screen should be skipped when approval policy is set, but got: {}",
+        contents
+    );
+
+    // Should show the main prompt directly (skipping onboarding)
+    assert!(
+        contents.contains("›") && contents.contains("context left"),
+        "Should show main prompt with context indicator, got: {}",
+        contents
+    );
+}
+
+#[test]
+fn test_poll_does_not_block_when_no_data() {
+    // RED phase: This test verifies that poll() returns quickly when no data is available,
+    // proving the PTY reader is in non-blocking mode
+    let mut session = TuiSession::spawn(24, 80).expect("Failed to spawn codex");
+
+    // Wait for initial startup to complete
+    session
+        .wait_for_text("›", TIMEOUT)
+        .expect("Initial startup failed");
+
+    // Wait for screen to stabilize - keep polling until contents don't change
+    let mut prev_contents = String::new();
+    for _ in 0..20 {
+        session.poll().expect("Poll failed during stabilization");
+        std::thread::sleep(Duration::from_millis(100));
+        let contents = session.screen_contents();
+        if contents == prev_contents {
+            // No change for 100ms, screen is stable
+            break;
+        }
+        prev_contents = contents;
+    }
+
+    // Now codex is truly waiting for input, no more data will come
+    // Poll should return immediately without blocking
+    let start = Instant::now();
+    session.poll().expect("Poll failed");
+    let elapsed = start.elapsed();
+
+    // Assert poll() completed in < 50ms (proves non-blocking)
+    // If blocking, would wait indefinitely and this would timeout
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "poll() took {:?}, expected < 50ms. Reader appears to be blocking!",
+        elapsed
     );
 }

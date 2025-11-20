@@ -5,6 +5,20 @@ use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 use vt100::Parser;
 
+#[cfg(unix)]
+/// Helper to set a file descriptor to non-blocking mode
+fn set_nonblocking(fd: std::os::unix::io::RawFd) -> Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+
 pub use keys::Key;
 mod keys;
 
@@ -24,8 +38,10 @@ impl TuiSession {
         let hello_py = temp_dir.path().join("hello.py");
         std::fs::write(&hello_py, "print('Hello, World!')")?;
 
-        let mut config = SessionConfig::default();
-        config.cwd = Some(temp_dir.path().to_path_buf());
+        let config = SessionConfig {
+            cwd: Some(temp_dir.path().to_path_buf()),
+            ..Default::default()
+        };
 
         Self::spawn_with_config_and_tempdir(rows, cols, config, Some(temp_dir))
     }
@@ -70,10 +86,15 @@ impl TuiSession {
         cmd.arg("--model");
         cmd.arg(&config.model);
 
-        if let Some(_approval) = &config.approval_policy {
-            // Set approval policy
+        // Set approval policy if specified (also sets sandbox to allow test execution)
+        if let Some(approval) = &config.approval_policy {
             cmd.arg("--ask-for-approval");
-            cmd.arg("on-failure");
+            cmd.arg(approval.as_str());
+        }
+        // Also set sandbox to workspace-write to allow file operations in tests
+        if let Some(sandbox) = &config.sandbox {
+            cmd.arg("--sandbox");
+            cmd.arg(sandbox.as_str());
         }
 
         // Set TERM to enable terminal features
@@ -90,6 +111,15 @@ impl TuiSession {
         }
 
         let _child = pair.slave.spawn_command(cmd)?;
+
+        // Set master PTY to non-blocking mode before cloning reader
+        // This ensures the cloned reader FD inherits the non-blocking flag
+        #[cfg(unix)]
+        {
+            if let Some(master_fd) = pair.master.as_raw_fd() {
+                set_nonblocking(master_fd)?;
+            }
+        }
 
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
@@ -112,25 +142,46 @@ impl TuiSession {
         // Create a small buffer for reading
         let mut buf = [0u8; 8192];
 
-        // The PTY reader will return immediately if no data is available
+        if std::env::var("DEBUG_TUI_PTY").is_ok() {
+            eprintln!("[DEBUG poll] About to call read()...");
+        }
+        let read_start = Instant::now();
+
+        // The PTY reader is in non-blocking mode and will return immediately if no data is available
         // We rely on the polling loop in wait_for() to handle timing
-        match self.reader.read(&mut buf) {
+        let read_result = self.reader.read(&mut buf);
+        let read_duration = read_start.elapsed();
+
+        if std::env::var("DEBUG_TUI_PTY").is_ok() {
+            eprintln!("[DEBUG poll] read() returned after {:?}", read_duration);
+        }
+
+        match read_result {
             Ok(0) => {
-                // EOF - process exited
+                if std::env::var("DEBUG_TUI_PTY").is_ok() {
+                    eprintln!("[DEBUG poll] read() returned Ok(0) - EOF/process exited");
+                }
                 Ok(())
             }
             Ok(n) => {
+                if std::env::var("DEBUG_TUI_PTY").is_ok() {
+                    eprintln!("[DEBUG poll] read() returned Ok({}) - {} bytes read", n, n);
+                }
                 // Intercept and respond to control sequences before parsing
                 let processed = self.intercept_control_sequences(&buf[..n])?;
                 self.parser.process(&processed);
                 Ok(())
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // No data available right now
+                if std::env::var("DEBUG_TUI_PTY").is_ok() {
+                    eprintln!("[DEBUG poll] read() returned WouldBlock - no data available");
+                }
                 Ok(())
             }
             Err(e) => {
-                // Actual error
+                if std::env::var("DEBUG_TUI_PTY").is_ok() {
+                    eprintln!("[DEBUG poll] read() returned Err: {}", e);
+                }
                 Err(e.into())
             }
         }
@@ -170,18 +221,74 @@ impl TuiSession {
     where
         F: Fn(&str) -> bool,
     {
+        let debug = std::env::var("DEBUG_TUI_PTY").is_ok();
+        if debug {
+            eprintln!(
+                "[DEBUG wait_for] Starting wait_for with timeout {:?}",
+                timeout
+            );
+        }
         let start = Instant::now();
+        let mut iteration = 0;
+
         loop {
+            iteration += 1;
+            let elapsed = start.elapsed();
+            if debug {
+                eprintln!(
+                    "[DEBUG wait_for] Iteration {}, elapsed: {:?}",
+                    iteration, elapsed
+                );
+                eprintln!("[DEBUG wait_for] Calling poll()...");
+            }
+
             self.poll().map_err(|e| e.to_string())?;
+
+            if debug {
+                eprintln!("[DEBUG wait_for] poll() completed");
+            }
+
             let contents = self.screen_contents();
+            if debug {
+                eprintln!(
+                    "[DEBUG wait_for] Screen contents length: {} bytes",
+                    contents.len()
+                );
+                eprintln!(
+                    "[DEBUG wait_for] Screen contents preview: {:?}",
+                    &contents.chars().take(100).collect::<String>()
+                );
+            }
+
             if pred(&contents) {
+                if debug {
+                    eprintln!(
+                        "[DEBUG wait_for] Predicate matched! Success after {:?}",
+                        elapsed
+                    );
+                }
                 return Ok(());
             }
+
+            if debug {
+                eprintln!("[DEBUG wait_for] Predicate did not match");
+            }
+
             if start.elapsed() > timeout {
+                if debug {
+                    eprintln!(
+                        "[DEBUG wait_for] TIMEOUT REACHED after {:?}",
+                        start.elapsed()
+                    );
+                }
                 return Err(format!(
                     "Timeout waiting for condition.\nScreen contents:\n{}",
                     contents
                 ));
+            }
+
+            if debug {
+                eprintln!("[DEBUG wait_for] Sleeping 50ms before next iteration");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -210,14 +317,63 @@ impl TuiSession {
     }
 }
 
+/// Sandbox policy for codex session
+#[derive(Debug, Clone, Copy)]
+pub enum Sandbox {
+    // [possible values: read-only, workspace-write, danger-full-access]
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl Sandbox {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Sandbox::ReadOnly => "read-only",
+            Sandbox::WorkspaceWrite => "workspace-write",
+            Sandbox::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+/// Approval policy for codex session
+#[derive(Debug, Clone, Copy)]
+pub enum ApprovalPolicy {
+    /// Only run trusted commands without approval
+    Untrusted,
+    /// Run all commands, ask for approval on failure
+    OnFailure,
+    /// Model decides when to ask
+    OnRequest,
+    /// Never ask for approval
+    Never,
+}
+
+impl ApprovalPolicy {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ApprovalPolicy::Untrusted => "untrusted",
+            ApprovalPolicy::OnFailure => "on-failure",
+            ApprovalPolicy::OnRequest => "on-request",
+            ApprovalPolicy::Never => "never",
+        }
+    }
+}
+
 /// Configuration for spawning a test session
-#[derive(Default)]
 pub struct SessionConfig {
     pub model: String,
     pub mock_agent_env: HashMap<String, String>,
     pub no_color: bool,
-    pub approval_policy: Option<()>, // TODO: untrusted, on-failure, on-request, never
+    pub approval_policy: Option<ApprovalPolicy>,
+    pub sandbox: Option<Sandbox>,
     pub cwd: Option<std::path::PathBuf>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SessionConfig {
@@ -226,7 +382,9 @@ impl SessionConfig {
             model: "mock-acp-agent".to_string(),
             mock_agent_env: HashMap::new(),
             no_color: true,
-            approval_policy: None,
+            approval_policy: Some(ApprovalPolicy::OnFailure),
+            // [possible values: read-only, workspace-write, danger-full-access]
+            sandbox: Some(Sandbox::WorkspaceWrite),
             cwd: None,
         }
     }
@@ -247,6 +405,26 @@ impl SessionConfig {
 
     pub fn with_agent_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.mock_agent_env.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn with_approval_policy(mut self, policy: ApprovalPolicy) -> Self {
+        self.approval_policy = Some(policy);
+        self
+    }
+
+    pub fn without_approval_policy(mut self) -> Self {
+        self.approval_policy = None;
+        self
+    }
+
+    pub fn with_sandbox(mut self, sandbox: Sandbox) -> Self {
+        self.sandbox = Some(sandbox);
+        self
+    }
+
+    pub fn without_sandbox(mut self) -> Self {
+        self.sandbox = None;
         self
     }
 }

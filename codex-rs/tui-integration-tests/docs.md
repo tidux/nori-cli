@@ -69,7 +69,20 @@ Builder pattern for test environment setup:
 - `with_mock_response(text)` - Set `MOCK_AGENT_RESPONSE` env var
 - `with_stream_until_cancel()` - Set `MOCK_AGENT_STREAM_UNTIL_CANCEL=1`
 - `with_agent_env(key, value)` - Pass custom env vars to mock agent
+- `with_approval_policy(policy)` - Set approval policy (defaults to `OnFailure`)
+- `without_approval_policy()` - Remove approval policy to test trust screen
 - `cwd` field - Optional working directory (auto-created temp directory if None)
+
+**Approval Policy:** `ApprovalPolicy` enum controls when codex asks for command approval:
+- `Untrusted` - Only run trusted commands without approval
+- `OnFailure` - Ask for approval only when commands fail (default for tests)
+- `OnRequest` - Model decides when to ask for approval
+- `Never` - Never ask for approval
+
+By default, all spawned sessions use `ApprovalPolicy::OnFailure` which:
+- Skips the trust directory approval screen at startup
+- Allows tests to run without manual intervention
+- Sets both `--ask-for-approval on-failure` and `--sandbox workspace-write` flags
 
 ### Things to Know
 
@@ -77,7 +90,7 @@ Builder pattern for test environment setup:
 
 | File | Coverage |
 |------|----------|
-| `@/codex-rs/tui-integration-tests/tests/startup.rs` | TUI initialization and prompt display |
+| `@/codex-rs/tui-integration-tests/tests/startup.rs` | TUI initialization, prompt display, trust screen skipping |
 | `@/codex-rs/tui-integration-tests/tests/prompt_flow.rs` | Prompt submission and agent responses |
 | `@/codex-rs/tui-integration-tests/tests/input_handling.rs` | Text editing, backspace, Ctrl-C clearing |
 | `@/codex-rs/tui-integration-tests/tests/cancellation.rs` | Stream cancellation with Escape key |
@@ -94,18 +107,22 @@ Snapshots stored in `@/codex-rs/tui-integration-tests/snapshots/*.snap` for regr
 **PTY Implementation Details:**
 
 - Uses `portable-pty` crate for cross-platform PTY support
+- PTY master is set to **non-blocking mode** using `fcntl(O_NONBLOCK)` on Unix systems
+- This prevents `read()` from blocking indefinitely when no data is available
 - Sets `TERM=xterm-256color` for terminal feature detection
 - NO_COLOR=1 by default for deterministic output parsing
 - Terminal size configurable (default 24x80, some tests use 40x120)
 
 **Polling Pattern:**
 
-`poll()` method attempts non-blocking read from PTY master:
+`poll()` method performs non-blocking read from PTY master:
+- PTY file descriptor is set to non-blocking mode during session initialization
 - Reads up to 8KB buffer per poll
 - Intercepts and responds to terminal control sequences before parsing
 - Feeds processed data to VT100 parser incrementally
-- Returns immediately on WouldBlock (no data available)
-- `wait_for()` loops with 50ms sleep between polls
+- Returns immediately with `WouldBlock` error when no data is available
+- `wait_for()` loops with 50ms sleep between polls, checking timeout after each iteration
+- Timeout mechanism works correctly because `read()` never blocks indefinitely
 
 **Control Sequence Interception:**
 
@@ -150,5 +167,20 @@ target/debug/codex (join "codex")
 - `insta = "1"` - Snapshot testing framework
 - `anyhow = "1"` - Error handling
 - `tempfile = "3"` - Temporary directory creation for test isolation
+- `nix = "0.27"` (Unix only) - fcntl for non-blocking I/O setup
+- `libc = "0.2"` (Unix only) - Low-level fcntl operations
+
+**Debugging:**
+
+Set `DEBUG_TUI_PTY=1` environment variable to enable detailed logging of PTY operations:
+```bash
+DEBUG_TUI_PTY=1 cargo test test_name -- --nocapture
+```
+
+This shows:
+- Each `poll()` call and its duration
+- Read results (bytes read, WouldBlock, EOF)
+- `wait_for()` loop iterations and elapsed time
+- Screen contents preview at each iteration
 
 Created and maintained by Nori.

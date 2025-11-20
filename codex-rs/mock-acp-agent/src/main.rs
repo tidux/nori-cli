@@ -177,10 +177,10 @@ impl acp::Agent for MockAgent {
         }
 
         // Support configurable delay for simulating realistic streaming
-        if let Ok(delay_str) = std::env::var("MOCK_AGENT_DELAY_MS") {
-            if let Ok(delay) = delay_str.parse::<u64>() {
-                sleep(Duration::from_millis(delay)).await;
-            }
+        if let Ok(delay_str) = std::env::var("MOCK_AGENT_DELAY_MS")
+            && let Ok(delay) = delay_str.parse::<u64>()
+        {
+            sleep(Duration::from_millis(delay)).await;
         }
 
         if let Ok(file_path) = std::env::var("MOCK_AGENT_REQUEST_FILE") {
