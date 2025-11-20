@@ -4,6 +4,32 @@ use tui_integration_tests::{SessionConfig, TuiSession};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Normalize dynamic content in screen output for snapshot testing
+fn normalize_for_snapshot(contents: String) -> String {
+    let mut normalized = contents;
+
+    // Replace /tmp/.tmpXXXXXX with placeholder
+    if let Some(start) = normalized.find("/tmp/.tmp") {
+        if let Some(end) = normalized[start..].find(char::is_whitespace) {
+            normalized.replace_range(start..start + end, "[TMP_DIR]");
+        }
+    }
+
+    // Replace dynamic prompt text on lines starting with ›
+    let lines: Vec<String> = normalized
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("›") && !line.contains("for shortcuts") {
+                "› [DEFAULT_PROMPT]".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+
+    lines.join("\n")
+}
+
 #[test]
 fn test_startup_shows_welcome() {
     let mut session = TuiSession::spawn_with_config(
@@ -23,7 +49,10 @@ fn test_startup_shows_welcome() {
     let contents = session.screen_contents();
     assert!(contents.contains("Welcome to Codex"));
     assert!(contents.contains("/tmp/"));
-    assert_snapshot!("startup_shows_welcome", session.screen_contents());
+    assert_snapshot!(
+        "startup_shows_welcome",
+        normalize_for_snapshot(session.screen_contents())
+    );
 }
 
 #[test]
@@ -45,7 +74,10 @@ fn test_startup_welcome_with_dimensions() {
     // Verify terminal size is respected
     let contents = session.screen_contents();
     assert!(contents.lines().count() <= 40);
-    assert_snapshot!("startup_welcome_dimensions_40x120", session.screen_contents());
+    assert_snapshot!(
+        "startup_welcome_dimensions_40x120",
+        normalize_for_snapshot(session.screen_contents())
+    );
 }
 
 #[test]
@@ -79,7 +111,10 @@ fn test_runs_in_temp_directory_by_default() {
         "Session should not run in home directory, but got: {}",
         contents
     );
-    assert_snapshot!("runs_in_temp_directory", session.screen_contents());
+    assert_snapshot!(
+        "runs_in_temp_directory",
+        normalize_for_snapshot(session.screen_contents())
+    );
 }
 
 #[test]
@@ -106,7 +141,10 @@ fn test_trust_screen_is_skipped_with_default_config() {
         "Should show main prompt with context indicator, got: {}",
         contents
     );
-    assert_snapshot!("trust_screen_skipped", session.screen_contents());
+    assert_snapshot!(
+        "trust_screen_skipped",
+        normalize_for_snapshot(session.screen_contents())
+    );
 }
 
 #[test]

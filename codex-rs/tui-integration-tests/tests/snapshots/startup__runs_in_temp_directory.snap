@@ -1,6 +1,7 @@
 ---
 source: tui-integration-tests/tests/startup.rs
-expression: session.screen_contents()
+assertion_line: 108
+expression: normalize_for_snapshot(session.screen_contents())
 ---
                                       
              _._:=++==+,_             
@@ -22,7 +23,7 @@ expression: session.screen_contents()
 
   Welcome to Codex, OpenAI's command-line coding agent
 
-> You are running Codex in /tmp/.tmpdOxzNS
+> You are running Codex in [TMP_DIR]
 
   Since this folder is not version controlled, we recommend requiring approval
   of all edits and commands.

@@ -90,19 +90,37 @@ By default, all spawned sessions use `ApprovalPolicy::OnFailure` which:
 
 | File | Coverage |
 |------|----------|
-| `@/codex-rs/tui-integration-tests/tests/startup.rs` | TUI initialization, prompt display, trust screen skipping |
+| `@/codex-rs/tui-integration-tests/tests/startup.rs` | TUI initialization, prompt display, trust screen skipping, snapshot testing for 4 startup scenarios |
 | `@/codex-rs/tui-integration-tests/tests/prompt_flow.rs` | Prompt submission and agent responses |
 | `@/codex-rs/tui-integration-tests/tests/input_handling.rs` | Text editing, backspace, Ctrl-C clearing |
 | `@/codex-rs/tui-integration-tests/tests/cancellation.rs` | Stream cancellation with Escape key |
 
+**Snapshot Files:**
+
+| File | Test Coverage |
+|------|---------------|
+| `@/codex-rs/tui-integration-tests/tests/snapshots/startup__startup_shows_welcome.snap` | Welcome screen display in 24x80 terminal |
+| `@/codex-rs/tui-integration-tests/tests/snapshots/startup__startup_welcome_dimensions_40x120.snap` | Welcome screen display respecting 40x120 terminal dimensions |
+| `@/codex-rs/tui-integration-tests/tests/snapshots/startup__runs_in_temp_directory.snap` | Temp directory path shown in welcome screen |
+| `@/codex-rs/tui-integration-tests/tests/snapshots/startup__trust_screen_skipped.snap` | Main prompt when trust screen is skipped with default config |
+
 **Snapshot Testing with Insta:**
 
-Tests use `insta::assert_snapshot!()` to capture terminal output:
+Tests use `insta::assert_snapshot!()` to capture terminal output for visual regression testing:
 ```rust
-assert_snapshot!("startup_screen", session.screen_contents());
+assert_snapshot!("startup_screen", normalize_for_snapshot(session.screen_contents()));
 ```
 
-Snapshots stored in `@/codex-rs/tui-integration-tests/snapshots/*.snap` for regression detection.
+Snapshots stored in `@/codex-rs/tui-integration-tests/tests/snapshots/*.snap` for regression detection. Each snapshot captures the exact terminal output state at a specific test point.
+
+**Snapshot Normalization:**
+
+The `normalize_for_snapshot()` helper function in `@/codex-rs/tui-integration-tests/tests/startup.rs` ensures stable snapshots across test runs by replacing dynamic content:
+- Temp directory paths (`/tmp/.tmpXXXXXX`) → `[TMP_DIR]` placeholder
+- Random default prompts on lines starting with `›` → `[DEFAULT_PROMPT]` placeholder
+- Lines containing "for shortcuts" are preserved as-is (e.g., "? for shortcuts")
+
+This normalization pattern allows snapshot assertions to focus on UI structure and content rather than ephemeral runtime values.
 
 **PTY Implementation Details:**
 
