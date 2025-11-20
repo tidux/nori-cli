@@ -93,9 +93,18 @@ Snapshots stored in `@/codex-rs/tui-integration-tests/snapshots/*.snap` for regr
 
 `poll()` method attempts non-blocking read from PTY master:
 - Reads up to 8KB buffer per poll
-- Feeds data to VT100 parser incrementally
+- Intercepts and responds to terminal control sequences before parsing
+- Feeds processed data to VT100 parser incrementally
 - Returns immediately on WouldBlock (no data available)
 - `wait_for()` loops with 50ms sleep between polls
+
+**Control Sequence Interception:**
+
+The `intercept_control_sequences()` method handles terminal queries that require responses:
+- Detects cursor position query (`ESC[6n`) in output stream from codex binary
+- Writes cursor position response (`ESC[1;1R`) back to PTY input
+- Removes control sequences from parser stream to avoid rendering artifacts
+- Enables crossterm terminal initialization without real terminal support
 
 **Mock Agent Integration:**
 
@@ -121,10 +130,9 @@ target/debug/codex (join "codex")
 
 **Known Limitations:**
 
-Tests currently fail due to cursor position query issue:
-- Crossterm tries to query cursor position via ANSI escape `\x1b[6n`
-- PTY emulator doesn't respond to cursor position requests
-- Requires either: test mode flag in TUI code, enhanced PTY emulator, or headless CLI flag
+- VT100 parser may not perfectly emulate all terminal behaviors
+- Terminal size changes after spawn not currently supported
+- Color codes disabled (NO_COLOR=1) for test determinism
 
 **Dependencies:**
 

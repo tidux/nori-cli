@@ -81,8 +81,9 @@ impl TuiSession {
                 Ok(())
             }
             Ok(n) => {
-                // Process the data we received
-                self.parser.process(&buf[..n]);
+                // Intercept and respond to control sequences before parsing
+                let processed = self.intercept_control_sequences(&buf[..n])?;
+                self.parser.process(&processed);
                 Ok(())
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -94,6 +95,35 @@ impl TuiSession {
                 Err(e.into())
             }
         }
+    }
+
+    /// Intercept control sequences and inject responses
+    ///
+    /// Detects cursor position queries (ESC[6n) and writes responses back to the PTY
+    /// Returns filtered data with control sequences removed
+    fn intercept_control_sequences(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        let mut result = Vec::with_capacity(data.len());
+        let mut i = 0;
+
+        while i < data.len() {
+            // Detect cursor position query: ESC[6n
+            if i + 3 < data.len()
+                && data[i] == 0x1b      // ESC
+                && data[i+1] == b'['
+                && data[i+2] == b'6'
+                && data[i+3] == b'n'
+            {
+                // Write response back to PTY: ESC[1;1R (cursor at row 1, col 1)
+                self.writer.write_all(b"\x1b[1;1R")?;
+                self.writer.flush()?;
+                // Skip the control sequence - don't pass it to the parser
+                i += 4;
+            } else {
+                result.push(data[i]);
+                i += 1;
+            }
+        }
+        Ok(result)
     }
 
     /// Wait for predicate with timeout

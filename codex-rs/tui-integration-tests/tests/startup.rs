@@ -9,7 +9,7 @@ fn test_startup_shows_prompt() {
     let mut session = TuiSession::spawn(24, 80).expect("Failed to spawn codex");
 
     session
-        .wait_for_text("To get started", TIMEOUT)
+        .wait_for_text("Welcome", TIMEOUT)
         .expect("Prompt did not appear");
 
     assert_snapshot!("startup_screen", session.screen_contents());
@@ -20,7 +20,7 @@ fn test_startup_with_dimensions() {
     let mut session = TuiSession::spawn(40, 120).expect("Failed to spawn codex");
 
     session
-        .wait_for_text("To get started", TIMEOUT)
+        .wait_for_text("Welcome", TIMEOUT)
         .expect("Prompt did not appear");
 
     // Verify terminal size is respected
