@@ -10,20 +10,47 @@ mod keys;
 
 /// PTY session for driving the codex TUI
 pub struct TuiSession {
-    master: Box<dyn portable_pty::MasterPty + Send>,
+    _master: Box<dyn portable_pty::MasterPty + Send>,
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
     parser: Parser,
+    _temp_dir: Option<tempfile::TempDir>,
 }
 
 impl TuiSession {
-    /// Spawn codex with mock-acp-agent
+    /// Spawn codex with mock-acp-agent in a temporary directory
     pub fn spawn(rows: u16, cols: u16) -> Result<Self> {
-        Self::spawn_with_config(rows, cols, SessionConfig::default())
+        let temp_dir = tempfile::tempdir()?;
+        let hello_py = temp_dir.path().join("hello.py");
+        std::fs::write(&hello_py, "print('Hello, World!')")?;
+
+        let mut config = SessionConfig::default();
+        config.cwd = Some(temp_dir.path().to_path_buf());
+
+        Self::spawn_with_config_and_tempdir(rows, cols, config, Some(temp_dir))
     }
 
     /// Spawn with custom configuration
-    pub fn spawn_with_config(rows: u16, cols: u16, config: SessionConfig) -> Result<Self> {
+    /// Creates a temp directory with hello.py if no cwd is specified in config
+    pub fn spawn_with_config(rows: u16, cols: u16, mut config: SessionConfig) -> Result<Self> {
+        if config.cwd.is_none() {
+            let temp_dir = tempfile::tempdir()?;
+            let hello_py = temp_dir.path().join("hello.py");
+            std::fs::write(&hello_py, "print('Hello, World!')")?;
+            config.cwd = Some(temp_dir.path().to_path_buf());
+            Self::spawn_with_config_and_tempdir(rows, cols, config, Some(temp_dir))
+        } else {
+            Self::spawn_with_config_and_tempdir(rows, cols, config, None)
+        }
+    }
+
+    /// Internal method to spawn with optional temp directory
+    fn spawn_with_config_and_tempdir(
+        rows: u16,
+        cols: u16,
+        config: SessionConfig,
+        temp_dir: Option<tempfile::TempDir>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows,
@@ -34,9 +61,20 @@ impl TuiSession {
 
         let mut cmd = CommandBuilder::new(codex_binary_path());
 
+        // Set working directory if provided
+        if let Some(cwd) = &config.cwd {
+            cmd.cwd(cwd);
+        }
+
         // Use mock-acp-agent model
         cmd.arg("--model");
         cmd.arg(&config.model);
+
+        if let Some(_approval) = &config.approval_policy {
+            // Set approval policy
+            cmd.arg("--ask-for-approval");
+            cmd.arg("on-failure");
+        }
 
         // Set TERM to enable terminal features
         cmd.env("TERM", "xterm-256color");
@@ -57,10 +95,11 @@ impl TuiSession {
         let writer = pair.master.take_writer()?;
 
         Ok(Self {
-            master: pair.master,
+            _master: pair.master,
             reader,
             writer,
             parser: Parser::new(rows, cols, 0),
+            _temp_dir: temp_dir,
         })
     }
 
@@ -177,6 +216,8 @@ pub struct SessionConfig {
     pub model: String,
     pub mock_agent_env: HashMap<String, String>,
     pub no_color: bool,
+    pub approval_policy: Option<()>, // TODO: untrusted, on-failure, on-request, never
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 impl SessionConfig {
@@ -185,6 +226,8 @@ impl SessionConfig {
             model: "mock-acp-agent".to_string(),
             mock_agent_env: HashMap::new(),
             no_color: true,
+            approval_policy: None,
+            cwd: None,
         }
     }
 

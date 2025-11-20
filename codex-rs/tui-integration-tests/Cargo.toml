@@ -8,6 +8,7 @@ portable-pty = "0.8"
 vt100 = "0.15"
 insta = "1"
 anyhow = "1"
+tempfile = "3"
 
 [dev-dependencies]
-# Tests only
+tempfile = "3"

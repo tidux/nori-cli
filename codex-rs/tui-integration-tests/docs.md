@@ -22,13 +22,21 @@ Path: @/codex-rs/tui-integration-tests
 **Test Harness:** `TuiSession` in `@/codex-rs/tui-integration-tests/src/lib.rs`
 
 The main API provides:
-- `spawn(rows, cols)` - Launch codex binary with mock-acp-agent in PTY
-- `spawn_with_config(rows, cols, config)` - Launch with custom environment variables
+- `spawn(rows, cols)` - Launch codex binary with mock-acp-agent in PTY with automatic temp directory
+- `spawn_with_config(rows, cols, config)` - Launch with custom configuration and automatic temp directory
 - `send_str(text)` - Simulate typing text
 - `send_key(key)` - Send keyboard events (Enter, Escape, Ctrl-C, etc.)
 - `wait_for_text(needle, timeout)` - Poll screen until text appears
 - `wait_for(predicate, timeout)` - Poll screen until condition matches
 - `screen_contents()` - Get current terminal screen as string
+
+**Automatic Test Isolation:**
+
+All tests run in isolated temporary directories created in `/tmp/`:
+- Each `spawn()` or `spawn_with_config()` call creates a new temp directory
+- Directory contains a `hello.py` file with `print('Hello, World!')`
+- Temp directory is automatically cleaned up when `TuiSession` is dropped
+- Tests no longer run in user's home directory for better isolation
 
 **Architecture:**
 
@@ -61,6 +69,7 @@ Builder pattern for test environment setup:
 - `with_mock_response(text)` - Set `MOCK_AGENT_RESPONSE` env var
 - `with_stream_until_cancel()` - Set `MOCK_AGENT_STREAM_UNTIL_CANCEL=1`
 - `with_agent_env(key, value)` - Pass custom env vars to mock agent
+- `cwd` field - Optional working directory (auto-created temp directory if None)
 
 ### Things to Know
 
@@ -140,5 +149,6 @@ target/debug/codex (join "codex")
 - `vt100 = "0.15"` - Terminal emulator/parser
 - `insta = "1"` - Snapshot testing framework
 - `anyhow = "1"` - Error handling
+- `tempfile = "3"` - Temporary directory creation for test isolation
 
 Created and maintained by Nori.

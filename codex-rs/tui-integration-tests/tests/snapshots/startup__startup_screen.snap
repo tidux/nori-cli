@@ -22,7 +22,7 @@ expression: session.screen_contents()
 
   Welcome to Codex, OpenAI's command-line coding agent
 
-> You are running Codex in /home/clifford
+> You are running Codex in [TMP_DIR]
 
   Since this folder is not version controlled, we recommend requiring approval
   of all edits and commands.
