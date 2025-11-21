@@ -211,13 +211,58 @@ fn test_screen_layout() {
 
 Review snapshots with `cargo insta review` after first run.
 
-## Terminal Dimensions
+**Normalizing Dynamic Content in Snapshots**
 
-Choose appropriate terminal size for each test:
+When tests include dynamic content (temp paths, timestamps, random prompts), normalize before snapshotting to prevent spurious failures:
 
-- **24x80**: Standard terminal, good for basic prompt flow
-- **40x120**: Larger terminal, good for testing layout with more content
-- **Small sizes (e.g., 10x40)**: Edge case testing for wrapping behavior
+```rust
+/// Normalize dynamic content in screen output for snapshot testing
+fn normalize_for_snapshot(contents: String) -> String {
+    let mut normalized = contents;
+
+    // Replace /tmp/.tmpXXXXXX with placeholder
+    if let Some(start) = normalized.find("/tmp/.tmp") {
+        if let Some(end) = normalized[start..].find(char::is_whitespace) {
+            normalized.replace_range(start..start + end, "[TMP_DIR]");
+        }
+    }
+
+    // Replace dynamic prompt text on lines starting with ›
+    let lines: Vec<String> = normalized
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("›") && !line.contains("for shortcuts") {
+                "› [DEFAULT_PROMPT]".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+
+    lines.join("\n")
+}
+
+#[test]
+fn test_with_normalized_snapshot() {
+    let mut session = TuiSession::spawn(24, 80).unwrap();
+    session.wait_for_text("Welcome", TIMEOUT).unwrap();
+
+    // Normalize before asserting to handle dynamic temp paths
+    assert_snapshot!(
+        "welcome_screen",
+        normalize_for_snapshot(session.screen_contents())
+    );
+}
+```
+
+**Common Dynamic Content to Normalize:**
+
+- Temp directory paths: `/tmp/.tmpXXXXXX` → `[TMP_DIR]`
+- Random default prompts: `› Improve documentation...` → `› [DEFAULT_PROMPT]`
+- Timestamps: `2025-01-15 10:30:45` → `[TIMESTAMP]`
+- Session IDs, PIDs, or other ephemeral identifiers
+
+This pattern ensures snapshots focus on UI structure and static content rather than runtime-specific values. See `@/codex-rs/tui-integration-tests/tests/startup.rs` for reference implementation.
 
 ## Configuration Options
 
@@ -232,21 +277,6 @@ Choose appropriate terminal size for each test:
 | `without_approval_policy()` | Remove approval policy to test trust screens |
 | `with_sandbox(sandbox)` | Set sandbox level (ReadOnly, WorkspaceWrite, DangerFullAccess) |
 | `without_sandbox()` | Remove sandbox to test trust screens |
-
-**ApprovalPolicy Values:**
-
-- `Untrusted`: Only run trusted commands without approval
-- `OnFailure`: Ask for approval only when commands fail (default for tests)
-- `OnRequest`: Model decides when to ask
-- `Never`: Never ask for approval
-
-**Default Test Configuration:**
-
-By default, `SessionConfig::default()` uses:
-- `ApprovalPolicy::OnFailure` - Skips initial trust screen
-- `Sandbox::WorkspaceWrite` - Allows file operations in tests
-- Creates temporary directory in `/tmp/` with `hello.py` file
-- Sets `NO_COLOR=1` for deterministic parsing
 
 ## TuiSession API
 
@@ -310,81 +340,6 @@ This shows:
    - If seeing escape sequences in output, may need additional interception
    - Check `intercept_control_sequences()` in lib.rs
 
-## Test File Organization
-
-Place tests in `codex-rs/tui-integration-tests/tests/`, for example:
-
-| File | Coverage |
-|------|----------|
-| `startup.rs` | TUI initialization, welcome screens, trust screen handling |
-| `prompt_flow.rs` | Prompt submission, agent responses, multiline input |
-| `input_handling.rs` | Text editing, backspace, keyboard events |
-| `cancellation.rs` | Stream cancellation, Ctrl-C, Escape handling |
-
-Create new test files for distinct feature areas (e.g., `markdown_rendering.rs`, `command_approval.rs`, etc.)
-
-## Example: Full Test Implementation
-
-```rust
-use insta::assert_snapshot;
-use std::time::Duration;
-use tui_integration_tests::{Key, SessionConfig, TuiSession};
-
-const TIMEOUT: Duration = Duration::from_secs(10);
-
-#[test]
-fn test_complete_interaction_flow() {
-    // Configure mock agent with custom response
-    let config = SessionConfig::new()
-        .with_mock_response("I can help with that task.");
-
-    // Spawn in larger terminal for better layout testing
-    let mut session = TuiSession::spawn_with_config(40, 120, config)
-        .expect("Failed to spawn codex");
-
-    // Wait for initial prompt
-    session.wait_for_text("To get started", TIMEOUT)
-        .expect("Initial prompt did not appear");
-
-    // Simulate user interaction
-    session.send_str("Please help me").unwrap();
-    session.wait_for_text("Please help me", TIMEOUT).unwrap();
-
-    // Submit prompt
-    session.send_key(Key::Enter).unwrap();
-
-    // Wait for agent response
-    session.wait_for_text("I can help with that task", TIMEOUT)
-        .expect("Agent response did not appear");
-
-    // Capture final state for regression testing
-    assert_snapshot!("complete_interaction", session.screen_contents());
-}
-```
-
 ## Testing Philosophy
 
-**Black-box Integration:**
-
-- Tests exercise the full application stack (CLI → TUI → Core → ACP)
-- No direct access to TUI internals, validates external behavior only
-- Screen content assertions mirror real user experience
-
-**Isolation:**
-
-- Each test runs in isolated temporary directory
-- No shared state between tests
-- Automatic cleanup on test completion
-
-**Determinism:**
-
-- Mock agent provides predictable responses
-- NO_COLOR=1 disables color codes
-- Fixed terminal dimensions
-- Snapshot testing catches unintended regressions
-
-**Complementary to Unit Tests:**
-
-- Unit tests in `codex-rs/tui/src/` validate component logic
-- Integration tests validate end-to-end terminal rendering and interaction
-- Both are necessary for comprehensive coverage
+These are black-box integration tests that exercise the full executable stack (CLI → TUI → Core → ACP). Each test runs in isolation with deterministic mock agent responses, validating external behavior through screen content assertions.
