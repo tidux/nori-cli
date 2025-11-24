@@ -1,9 +1,38 @@
 //! ACP agent registry
 //!
 //! Provides configuration for ACP agents (subprocess command and args)
-//! without requiring changes to core ModelProviderInfo struct.
+//! with embedded provider info to avoid circular dependencies with core.
 
 use anyhow::Result;
+use std::time::Duration;
+
+/// Default idle timeout for ACP streaming (5 minutes)
+const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Provider information embedded in ACP agent config.
+/// This mirrors relevant fields from `ModelProviderInfo` to avoid circular dependencies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpProviderInfo {
+    /// Friendly display name (e.g., "Gemini ACP", "Mock ACP")
+    pub name: String,
+    /// Maximum number of request retries
+    pub request_max_retries: u64,
+    /// Maximum number of stream reconnection attempts
+    pub stream_max_retries: u64,
+    /// Idle timeout for streaming responses
+    pub stream_idle_timeout: Duration,
+}
+
+impl Default for AcpProviderInfo {
+    fn default() -> Self {
+        Self {
+            name: "ACP".to_string(),
+            request_max_retries: 1,
+            stream_max_retries: 1,
+            stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
+        }
+    }
+}
 
 /// Configuration for an ACP agent subprocess
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +44,8 @@ pub struct AcpAgentConfig {
     pub command: String,
     /// Arguments to pass to the command
     pub args: Vec<String>,
+    /// Provider information for this ACP agent
+    pub provider_info: AcpProviderInfo,
 }
 
 /// Get ACP agent configuration for a given model name
@@ -58,6 +89,10 @@ pub fn get_agent_config(model_name: &str) -> Result<AcpAgentConfig> {
                 provider_slug: "mock-acp".to_string(),
                 command: exe_path.to_string_lossy().to_string(),
                 args: vec![],
+                provider_info: AcpProviderInfo {
+                    name: "Mock ACP".to_string(),
+                    ..Default::default()
+                },
             })
         }
         "gemini-2.5-flash" | "gemini-acp" => Ok(AcpAgentConfig {
@@ -67,11 +102,19 @@ pub fn get_agent_config(model_name: &str) -> Result<AcpAgentConfig> {
                 "@google/gemini-cli".to_string(),
                 "--experimental-acp".to_string(),
             ],
+            provider_info: AcpProviderInfo {
+                name: "Gemini ACP".to_string(),
+                ..Default::default()
+            },
         }),
         "claude" | "claude-acp" => Ok(AcpAgentConfig {
             provider_slug: "claude-acp".to_string(),
             command: "npx".to_string(),
             args: vec!["@zed-industries/claude-code-acp".to_string()],
+            provider_info: AcpProviderInfo {
+                name: "Claude ACP".to_string(),
+                ..Default::default()
+            },
         }),
         _ => anyhow::bail!("Unknown ACP model: {model_name}"),
     }
@@ -92,6 +135,9 @@ mod tests {
             config.command
         );
         assert_eq!(config.args, Vec::<String>::new());
+        assert_eq!(config.provider_info.name, "Mock ACP");
+        assert_eq!(config.provider_info.request_max_retries, 1);
+        assert_eq!(config.provider_info.stream_max_retries, 1);
     }
 
     #[test]
@@ -105,6 +151,7 @@ mod tests {
             config.args,
             vec!["@google/gemini-cli", "--experimental-acp"]
         );
+        assert_eq!(config.provider_info.name, "Gemini ACP");
     }
 
     #[test]

@@ -18,15 +18,28 @@ Path: @/codex-rs/acp
 ### Model Registry
 
 The ACP registry in `@/codex-rs/acp/src/registry.rs` is **model-centric** rather than provider-centric:
-- `get_agent_config()` accepts model names (e.g., "mock-model", "gemini-flash-2.5") instead of provider names
-- Called from `@/codex-rs/core/src/client.rs` with `self.config.model` when handling `WireApi::Acp`
-- Returns `AcpAgentConfig` containing three fields:
-  - `provider`: Identifies which agent subprocess to spawn (e.g., "mock-acp", "gemini-acp")
+- `get_agent_config()` accepts model names (e.g., "mock-model", "gemini-2.5-flash") instead of provider names
+- Called from `@/codex-rs/core/src/client.rs` at the start of `stream()` to check if model is an ACP agent
+- Returns `AcpAgentConfig` containing:
+  - `provider_slug`: Identifies which agent subprocess to spawn (e.g., "mock-acp", "gemini-acp")
   - `command`: Executable path or command name
   - `args`: Arguments to pass to the subprocess
-- Model names are normalized to lowercase for case-insensitive matching (e.g., "Gemini-Flash-2.5" → "gemini-flash-2.5")
+  - `provider_info`: Embedded `AcpProviderInfo` with provider configuration (name, retry settings, timeouts)
+- Model names are normalized to lowercase for case-insensitive matching (e.g., "Gemini-2.5-Flash" → "gemini-2.5-flash")
 - Uses exact matching only (no prefix matching) - each model must be explicitly registered
-- The `provider` field enables future optimization to determine when existing subprocess can be reused vs when new one must be spawned when switching models
+- The `provider_slug` field enables future optimization to determine when existing subprocess can be reused vs when new one must be spawned when switching models
+
+### Embedded Provider Info
+
+ACP providers embed their configuration directly in `AcpAgentConfig` via `AcpProviderInfo`:
+- Avoids circular dependency between `codex-acp` and `codex-core` (core depends on acp, not vice versa)
+- ACP providers are NOT in `built_in_model_providers()` in core - they're self-contained in the registry
+- `AcpProviderInfo` contains:
+  - `name`: Display name (e.g., "Gemini ACP")
+  - `request_max_retries`: Max request retries (default: 1)
+  - `stream_max_retries`: Max stream reconnection attempts (default: 1)
+  - `stream_idle_timeout`: Idle timeout for streaming (default: 5 minutes)
+- Core's `client.rs` checks the ACP registry first in `stream()`, using the embedded provider info for ACP models
 
 
 ### Stderr Capture Implementation

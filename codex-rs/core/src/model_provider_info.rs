@@ -310,11 +310,18 @@ pub const DEFAULT_OLLAMA_PORT: u16 = 11434;
 pub const LMSTUDIO_OSS_PROVIDER_ID: &str = "lmstudio";
 pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 pub const BUILT_IN_OSS_MODEL_PROVIDER_ID: &str = "oss";
+
+// ACP provider identifiers (used for model inference, not in built_in_model_providers)
+// Actual ACP provider configuration is embedded in AcpAgentConfig from codex_acp::registry
 pub const CLAUDE_ACP_PROVIDER_ID: &str = "claude-acp";
 pub const GEMINI_ACP_PROVIDER_ID: &str = "gemini-acp";
 pub const MOCK_ACP_PROVIDER_ID: &str = "mock-acp";
 
 /// Built-in default provider list.
+///
+/// Note: ACP providers (mock-acp, claude-acp, gemini-acp) are NOT included here.
+/// ACP agent configuration is handled by the `codex_acp::registry` module,
+/// which embeds provider info directly in `AcpAgentConfig` to avoid circular dependencies.
 pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
     use ModelProviderInfo as P;
 
@@ -370,67 +377,6 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
         (
             LMSTUDIO_OSS_PROVIDER_ID,
             create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses),
-        ),
-        // TODO: after all finished and workinhg, return the retries back to 5
-        (
-            MOCK_ACP_PROVIDER_ID,
-            P {
-                name: "Mock ACP".into(),
-                // ACP agents communicate via subprocess, not HTTP
-                base_url: None,
-                env_key: None,
-                env_key_instructions: None,
-                experimental_bearer_token: None,
-                // ACP uses its own protocol, not HTTP-based wire APIs
-                wire_api: WireApi::Acp,
-                query_params: None,
-                http_headers: None,
-                env_http_headers: None,
-                request_max_retries: Some(1),
-                stream_max_retries: Some(1),
-                stream_idle_timeout_ms: None,
-                requires_openai_auth: false,
-            },
-        ),
-        (
-            CLAUDE_ACP_PROVIDER_ID,
-            P {
-                name: "Claude ACP".into(),
-                // ACP agents communicate via subprocess, not HTTP
-                base_url: None,
-                env_key: None,
-                env_key_instructions: None,
-                experimental_bearer_token: None,
-                // ACP uses its own protocol, not HTTP-based wire APIs
-                wire_api: WireApi::Acp,
-                query_params: None,
-                http_headers: None,
-                env_http_headers: None,
-                request_max_retries: Some(1),
-                stream_max_retries: Some(1),
-                stream_idle_timeout_ms: None,
-                requires_openai_auth: false,
-            },
-        ),
-        (
-            GEMINI_ACP_PROVIDER_ID,
-            P {
-                name: "Gemini ACP".into(),
-                // ACP agents communicate via subprocess, not HTTP
-                base_url: None,
-                env_key: None,
-                env_key_instructions: None,
-                experimental_bearer_token: None,
-                // ACP uses its own protocol, not HTTP-based wire APIs
-                wire_api: WireApi::Acp,
-                query_params: None,
-                http_headers: None,
-                env_http_headers: None,
-                request_max_retries: Some(1),
-                stream_max_retries: Some(1),
-                stream_idle_timeout_ms: None,
-                requires_openai_auth: false,
-            },
         ),
     ]
     .into_iter()

@@ -154,22 +154,27 @@ impl ModelClient {
     }
 
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
-        // First try loading the model fom the ACP registry, ignoring the provider
-        // TODO: registry needs to also resolve the model provider
-        // possible wrapping the ACP config
-        // let providers = self.config().model_providers;
-        let provider_config =
-            if let Ok(acp) = codex_acp::registry::get_agent_config(&self.get_model()) {
-                tracing::debug!(
-                    "Agent: {}, Provider: {}",
-                    &self.get_model(),
-                    acp.provider_slug
-                );
-                todo!();
-            } else {
-                &self.provider
-            };
-        match provider_config.wire_api {
+        // First check if this model is an ACP agent. If so, the agent config
+        // contains embedded provider info and we use the ACP wire protocol.
+        // Otherwise, use the configured HTTP-based provider.
+        if let Ok(acp_config) = codex_acp::get_agent_config(&self.get_model()) {
+            debug!(
+                "Resolved ACP agent: {}, provider: {}, command: {}",
+                &self.get_model(),
+                acp_config.provider_slug,
+                acp_config.command
+            );
+
+            // TODO: Implement ACP client session management and ResponseStream bridging
+            // This will involve:
+            // 1. Creating or reusing an ACP subprocess session
+            // 2. Sending the prompt via ACP protocol
+            // 3. Streaming responses back through a ResponseStream
+            todo!("ACP streaming not yet implemented");
+        }
+
+        // Non-ACP path: use HTTP-based provider (Responses or Chat API)
+        match self.provider.wire_api {
             WireApi::Responses => self.stream_responses(prompt).await,
             WireApi::Chat => {
                 // Create the raw streaming connection first.
@@ -209,20 +214,13 @@ impl ModelClient {
                 Ok(ResponseStream { rx_event: rx })
             }
             WireApi::Acp => {
-                // Get ACP agent configuration from registry using model name
-                debug!("Looking up ACP agent for model: {}", &self.config.model);
-                let agent_config = codex_acp::get_agent_config(&self.config.model)
-                    // TODO unify this retreival with the above
-                    // (put the agent config in the ACP variant?)
-                    .map_err(|e| CodexErr::Fatal(format!("ACP agent config error: {e}")))?;
-                debug!(
-                    "Resolved ACP provider: {}, command: {}",
-                    provider_config.name, agent_config.command
-                );
-
-                // Create ACP client
-                todo!();
-                // Then use or create a session to deliver a ResponseStream
+                // This branch should not be reached since ACP models are handled above.
+                // If we get here, it means someone manually configured wire_api: acp
+                // for a model that isn't in the ACP registry.
+                Err(CodexErr::Fatal(format!(
+                    "Model '{}' has wire_api=acp but is not registered in the ACP registry",
+                    &self.config.model
+                )))
             }
         }
     }

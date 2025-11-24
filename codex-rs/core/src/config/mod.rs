@@ -1070,8 +1070,8 @@ impl Config {
         let model_provider_id = model_provider
             .or(config_profile.model_provider)
             .or(cfg.model_provider)
-            .or_else(|| infer_provider_from_model(&model))
             .unwrap_or_else(|| "openai".to_string());
+
         let model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
@@ -1325,36 +1325,6 @@ fn default_model() -> String {
 
 fn default_review_model() -> String {
     OPENAI_DEFAULT_REVIEW_MODEL.to_string()
-}
-
-/// Infer the provider ID from the model name when no provider is explicitly specified.
-///
-/// This allows users to specify just `--model mock-acp` without needing to also
-/// specify `--model-provider mock-acp`.
-fn infer_provider_from_model(model: &str) -> Option<String> {
-    use crate::model_provider_info::CLAUDE_ACP_PROVIDER_ID;
-    use crate::model_provider_info::GEMINI_ACP_PROVIDER_ID;
-    use crate::model_provider_info::MOCK_ACP_PROVIDER_ID;
-    tracing::debug!("Inferring provider! found model {model}");
-
-    // Check for ACP-based models that have their own provider
-    if model.starts_with("mock") {
-        tracing::debug!("Inferring provider! choosing `mock-acp`");
-        return Some(MOCK_ACP_PROVIDER_ID.to_string());
-    }
-
-    if model.starts_with("claude") {
-        tracing::debug!("Inferring provider! choosing `claude-acp`");
-        return Some(CLAUDE_ACP_PROVIDER_ID.to_string());
-    }
-
-    if model.starts_with("gemini") {
-        tracing::debug!("Inferring provider! choosing `gemini-acp`");
-        return Some(GEMINI_ACP_PROVIDER_ID.to_string());
-    }
-
-    // No inference - let the caller use the default
-    None
 }
 
 /// Returns the path to the Codex configuration directory, which can be

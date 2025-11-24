@@ -6,6 +6,8 @@
 pub mod registry;
 pub mod tracing_setup;
 
+pub use registry::AcpAgentConfig;
+pub use registry::AcpProviderInfo;
 pub use registry::get_agent_config;
 pub use tracing_setup::init_file_tracing;
 

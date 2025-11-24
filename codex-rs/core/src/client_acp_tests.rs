@@ -1,76 +1,10 @@
 //! Unit tests for ACP wire API implementation
+//!
+//! Note: Most ACP provider tests have moved to the codex-acp crate.
+//! This file contains only core-specific ACP integration tests.
 
 #[cfg(test)]
 mod tests {
-    use crate::model_provider_info::WireApi;
-    use crate::model_provider_info::built_in_model_providers;
-
-    #[test]
-    fn test_mock_acp_provider_exists() {
-        let providers = built_in_model_providers();
-        let mock_acp = providers.get("mock-acp");
-
-        assert!(
-            mock_acp.is_some(),
-            "mock-acp provider should exist in built-in providers"
-        );
-    }
-
-    #[test]
-    fn test_mock_acp_provider_uses_acp_wire_api() {
-        let providers = built_in_model_providers();
-        let mock_acp = providers.get("mock-acp").expect("mock-acp should exist");
-
-        assert_eq!(
-            mock_acp.wire_api,
-            WireApi::Acp,
-            "mock-acp should use WireApi::Acp"
-        );
-    }
-
-    #[test]
-    fn test_gemini_acp_provider_exists() {
-        let providers = built_in_model_providers();
-        let gemini_acp = providers.get("gemini-acp");
-
-        assert!(
-            gemini_acp.is_some(),
-            "gemini-acp provider should exist in built-in providers"
-        );
-    }
-
-    #[test]
-    fn test_gemini_acp_provider_uses_acp_wire_api() {
-        let providers = built_in_model_providers();
-        let gemini_acp = providers
-            .get("gemini-acp")
-            .expect("gemini-acp should exist");
-
-        assert_eq!(
-            gemini_acp.wire_api,
-            WireApi::Acp,
-            "gemini-acp should use WireApi::Acp"
-        );
-    }
-
-    #[test]
-    fn test_acp_registry_integration() {
-        // Verify that the ACP registry can be called from core using model names
-        let mock_config = codex_acp::get_agent_config("mock-model");
-        assert!(
-            mock_config.is_ok(),
-            "Should be able to get config for mock-model from registry"
-        );
-
-        let config = mock_config.unwrap();
-        assert_eq!(config.provider_slug, "mock-acp");
-        assert!(
-            config.command.contains("mock_acp_agent"),
-            "Command should contain 'mock_acp_agent'"
-        );
-        assert_eq!(config.args, Vec::<String>::new());
-    }
-
     #[test]
     fn test_acp_get_full_url_returns_empty() {
         use crate::ModelProviderInfo;
