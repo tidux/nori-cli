@@ -4,6 +4,7 @@ use tui_pty_e2e::normalize_for_snapshot;
 use tui_pty_e2e::Key;
 use tui_pty_e2e::TuiSession;
 use tui_pty_e2e::TIMEOUT;
+use tui_pty_e2e::TIMEOUT_INPUT;
 
 #[test]
 fn test_ctrl_c_clears_input() {
@@ -22,6 +23,7 @@ fn test_ctrl_c_clears_input() {
         .wait_for(|s| !s.contains("draft message"), TIMEOUT)
         .expect("Input was not cleared");
 
+    std::thread::sleep(TIMEOUT_INPUT);
     assert_snapshot!(
         "ctrl_c_clears",
         normalize_for_snapshot(session.screen_contents())
@@ -44,6 +46,7 @@ fn test_backspace() {
     session.wait_for_text("Hel", TIMEOUT).unwrap();
     session.wait_for(|s| !s.contains("Hello"), TIMEOUT).unwrap();
 
+    std::thread::sleep(TIMEOUT_INPUT);
     assert_snapshot!(
         "typing_and_backspace",
         normalize_for_snapshot(session.screen_contents())
@@ -65,6 +68,7 @@ fn test_arrows() {
     session.send_key(Key::Down).unwrap();
     std::thread::sleep(Duration::from_millis(100));
 
+    std::thread::sleep(TIMEOUT_INPUT);
     assert_snapshot!(
         "model_changed",
         normalize_for_snapshot(session.screen_contents())

@@ -518,6 +518,7 @@ fn codex_binary_path() -> String {
 }
 
 pub const TIMEOUT: Duration = Duration::from_secs(5);
+pub const TIMEOUT_INPUT: Duration = Duration::from_millis(300);
 
 /// Normalize dynamic content in screen output for snapshot testing
 pub fn normalize_for_snapshot(contents: String) -> String {

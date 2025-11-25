@@ -5,6 +5,7 @@ use tui_pty_e2e::Key;
 use tui_pty_e2e::SessionConfig;
 use tui_pty_e2e::TuiSession;
 use tui_pty_e2e::TIMEOUT;
+use tui_pty_e2e::TIMEOUT_INPUT;
 
 #[test]
 fn test_submit_text() {
@@ -19,7 +20,8 @@ fn test_submit_text() {
     std::thread::sleep(Duration::from_millis(100));
     session.send_key(Key::Enter).unwrap();
     std::thread::sleep(Duration::from_millis(100));
-    session.wait_for_text("GOOGLE_API_KEY", TIMEOUT).unwrap();
+    session.wait_for_text("? for shortcuts", TIMEOUT).unwrap();
+    std::thread::sleep(TIMEOUT_INPUT);
 
     assert_snapshot!(
         "submit_input",

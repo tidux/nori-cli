@@ -11,10 +11,10 @@ expression: normalize_for_snapshot(session.screen_contents())
   /review - review any changes and find issues
 
 
-› Hello
+› test prompt
 
 
-• Test message 1Test message 2
+• This is a custom test response from the mock agent.
 
 
 › [DEFAULT_PROMPT]

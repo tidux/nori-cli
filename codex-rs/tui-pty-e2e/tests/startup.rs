@@ -5,26 +5,28 @@ use tui_pty_e2e::normalize_for_snapshot;
 use tui_pty_e2e::SessionConfig;
 use tui_pty_e2e::TuiSession;
 use tui_pty_e2e::TIMEOUT;
+use tui_pty_e2e::TIMEOUT_INPUT;
 
 #[test]
-fn test_startup_shows_welcome() {
+fn test_startup_shows_banner() {
     let mut session = TuiSession::spawn_with_config(
         24,
         80,
         SessionConfig::default()
             // Don't include the values that would bypass welcome
             .without_approval_policy()
-            .without_sandbox(),
+            .without_sandbox()
+            .with_config_toml(""),
     )
     .expect("Failed to spawn codex");
 
     session
-        .wait_for_text("Welcome", TIMEOUT)
+        .wait_for_text("Welcome to Codex", TIMEOUT)
         .expect("Prompt did not appear");
+    std::thread::sleep(TIMEOUT_INPUT);
 
     let contents = session.screen_contents();
     assert!(contents.contains("Welcome to Codex"));
-    assert!(contents.contains("/tmp/"));
     assert_snapshot!(
         "startup_shows_welcome",
         normalize_for_snapshot(session.screen_contents())
@@ -44,8 +46,9 @@ fn test_startup_welcome_with_dimensions() {
     .expect("Failed to spawn codex");
 
     session
-        .wait_for_text("Welcome", TIMEOUT)
+        .wait_for_text("OpenAI Codex", TIMEOUT)
         .expect("Prompt did not appear");
+    std::thread::sleep(TIMEOUT_INPUT);
 
     // Verify terminal size is respected
     let contents = session.screen_contents();
@@ -69,8 +72,9 @@ fn test_runs_in_temp_directory_by_default() {
     .expect("Failed to spawn codex");
 
     session
-        .wait_for_text("Welcome", TIMEOUT)
+        .wait_for_text("To get started", TIMEOUT)
         .expect("Prompt did not appear");
+    std::thread::sleep(TIMEOUT_INPUT);
 
     let contents = session.screen_contents();
 
@@ -101,6 +105,7 @@ fn test_trust_screen_is_skipped_with_default_config() {
     session
         .wait_for_text("›", TIMEOUT)
         .expect("Prompt did not appear");
+    std::thread::sleep(TIMEOUT_INPUT);
 
     let contents = session.screen_contents();
 
