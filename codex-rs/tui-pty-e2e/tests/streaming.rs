@@ -1,5 +1,4 @@
 use insta::assert_snapshot;
-use std::time::Duration;
 use tui_pty_e2e::normalize_for_snapshot;
 use tui_pty_e2e::Key;
 use tui_pty_e2e::SessionConfig;
@@ -10,16 +9,20 @@ use tui_pty_e2e::TIMEOUT_INPUT;
 #[test]
 fn test_submit_text() {
     let config = SessionConfig::new().with_stream_until_cancel();
-
     let mut session = TuiSession::spawn_with_config(24, 80, config).unwrap();
-    session.wait_for_text("To get started", TIMEOUT).unwrap();
+
+    session
+        .wait_for_text("›", TIMEOUT)
+        .expect("Prompt did not appear");
+    std::thread::sleep(TIMEOUT_INPUT);
 
     // Submit prompt
     session.send_str("testing!!!").unwrap();
     session.wait_for_text("testing!!!", TIMEOUT).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+    std::thread::sleep(TIMEOUT_INPUT);
     session.send_key(Key::Enter).unwrap();
-    std::thread::sleep(Duration::from_millis(100));
+
+    std::thread::sleep(TIMEOUT_INPUT);
     session.wait_for_text("? for shortcuts", TIMEOUT).unwrap();
     std::thread::sleep(TIMEOUT_INPUT);
 
@@ -29,39 +32,49 @@ fn test_submit_text() {
     );
 }
 
-// #[test]
-// fn test_escape_cancels_streaming() {
-//     let config = SessionConfig::new().with_stream_until_cancel();
-//
-//     let mut session = TuiSession::spawn_with_config(24, 80, config).unwrap();
-//     session.wait_for_text("To get started", TIMEOUT).unwrap();
-//
-//     // Submit prompt
-//     session.send_str("testing!!!").unwrap();
-//     session.wait_for_text("testing!!!", TIMEOUT).unwrap();
-//     std::thread::sleep(Duration::from_millis(100));
-//     session.send_key(Key::Enter).unwrap();
-//     std::thread::sleep(Duration::from_millis(100));
-//
-//     // Wait for streaming to start
-//     session
-//         .wait_for_text("Streaming...", TIMEOUT)
-//         .expect("Streaming did not start");
-//
-//     // Press Escape to cancel
-//     session.send_key(Key::Escape).unwrap();
-//
-//     // Verify cancellation completed
-//     // (exact behavior depends on TUI implementation)
-//     session
-//         .wait_for(
-//             |s| s.contains("Cancelled") || s.contains("Stopped"),
-//             TIMEOUT,
-//         )
-//         .ok(); // May not show explicit message
-//
-//     assert_snapshot!(
-//         "cancelled_stream",
-//         normalize_for_snapshot(session.screen_contents())
-//     )
-// }
+#[test]
+fn test_escape_cancels_streaming() {
+    // Use git_init to prevent "Snapshots disabled" from racing with "Working" status
+    let config = SessionConfig::new().with_stream_until_cancel();
+    let mut session = TuiSession::spawn_with_config(24, 80, config).unwrap();
+
+    // Wait for the prompt to appear (indicated by the chevron character)
+    session
+        .wait_for_text("›", TIMEOUT)
+        .expect("Prompt did not appear");
+    std::thread::sleep(TIMEOUT_INPUT);
+
+    // Submit prompt
+    session.send_str("testing!!!").unwrap();
+    session.wait_for_text("testing!!!", TIMEOUT).unwrap();
+    std::thread::sleep(TIMEOUT_INPUT);
+    session.send_key(Key::Enter).unwrap();
+    std::thread::sleep(TIMEOUT_INPUT);
+
+    // Wait for streaming to start
+    session
+        .wait_for_text("Working", TIMEOUT)
+        .expect("Streaming did not start");
+
+    // Press Escape to cancel doesn't work?
+    session.send_key(Key::Escape).unwrap();
+    std::thread::sleep(TIMEOUT_INPUT);
+    // Press ctrl-c to cancel doesn't work?
+    // session.send_key(Key::Ctrl('c')).unwrap();
+    // std::thread::sleep(TIMEOUT_INPUT);
+
+    std::thread::sleep(TIMEOUT);
+    // Verify cancellation completed
+    // (exact behavior depends on TUI implementation)
+    session
+        .wait_for_text(
+            "Conversation interrupted - tell the model what to do differently",
+            TIMEOUT,
+        )
+        .expect("No interrupt reported");
+
+    assert_snapshot!(
+        "cancelled_stream",
+        normalize_for_snapshot(session.screen_contents())
+    )
+}

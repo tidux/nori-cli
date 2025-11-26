@@ -81,6 +81,15 @@ impl TuiSession {
             let temp_dir = tempfile::tempdir()?;
             let hello_py = temp_dir.path().join("hello.py");
             std::fs::write(&hello_py, "print('Hello, World!')")?;
+
+            // Initialize as git repo if requested (prevents "Snapshots disabled" race)
+            if config.git_init {
+                std::process::Command::new("git")
+                    .args(["init"])
+                    .current_dir(temp_dir.path())
+                    .output()?;
+            }
+
             config.cwd = Some(temp_dir.path().to_path_buf());
             Self::spawn_with_config_and_tempdir(rows, cols, config, Some(temp_dir))
         } else {
@@ -433,6 +442,10 @@ pub struct SessionConfig {
     /// Custom config.toml content. If None, a default config will be generated.
     /// Set to Some("") to write an empty config file.
     pub config_toml: Option<String>,
+    /// Initialize the temp directory as a git repository.
+    /// This prevents the "Snapshots disabled" BackgroundEvent from overwriting
+    /// the "Working" status indicator during streaming tests.
+    pub git_init: bool,
 }
 
 impl Default for SessionConfig {
@@ -452,6 +465,7 @@ impl SessionConfig {
             sandbox: Some(Sandbox::WorkspaceWrite),
             cwd: None,
             config_toml: None,
+            git_init: true,
         }
     }
 
@@ -501,6 +515,14 @@ impl SessionConfig {
 
     pub fn with_config_toml(mut self, content: impl Into<String>) -> Self {
         self.config_toml = Some(content.into());
+        self
+    }
+
+    /// Initialize the temp directory as a git repository.
+    pub fn without_git_init(mut self) -> Self {
+        // This prevents the "Snapshots disabled" BackgroundEvent from racing
+        // with the "Working" status indicator during streaming tests.
+        self.git_init = false;
         self
     }
 }

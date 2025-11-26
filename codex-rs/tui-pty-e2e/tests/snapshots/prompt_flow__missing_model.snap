@@ -2,6 +2,7 @@
 source: tui-pty-e2e/tests/prompt_flow.rs
 expression: normalize_for_snapshot(session.screen_contents())
 ---
+  /init - create an AGENTS.md file with instructions for Codex
   /status - show current session configuration
   /approvals - choose what Codex can do without approval
   /model - choose what model and reasoning effort to use
@@ -13,8 +14,6 @@ expression: normalize_for_snapshot(session.screen_contents())
 
 ■ Fatal error: Model 'nonexistent' has wire_api=acp but is not registered in the
 ACP registry
-
-• Snapshots disabled: current directory is not a Git repository. (0s • esc to in
 
 
 › [DEFAULT_PROMPT]
