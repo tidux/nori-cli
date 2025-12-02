@@ -258,6 +258,7 @@ jobs:
             echo "$pr_body"
           else
             gh pr create \
+              --repo "${{ github.repository }}" \
               --base dev \
               --head "$SYNC_BRANCH" \
               --title "$pr_title" \
