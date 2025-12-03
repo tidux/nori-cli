@@ -162,7 +162,7 @@ trust_level = "trusted"
 
 [model_providers.mock_provider]
 name = "Mock ACP provider for tests"
-wire_api = "acp"
+# wire_api = "acp"
 "#,
                     model = config.model,
                     cwd = cwd_path
