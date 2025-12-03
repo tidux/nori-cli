@@ -32,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.90
         with:
           targets: ${{ matrix.target }}
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Compute lockfile hash
         id: lockhash
