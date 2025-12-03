@@ -39,6 +39,7 @@ use codex_app_server_protocol::GetConversationSummaryResponse;
 use codex_app_server_protocol::GetUserAgentResponse;
 use codex_app_server_protocol::GetUserSavedConfigResponse;
 use codex_app_server_protocol::GitDiffToRemoteResponse;
+use codex_app_server_protocol::GitInfo as ApiGitInfo;
 use codex_app_server_protocol::InputItem as WireInputItem;
 use codex_app_server_protocol::InterruptConversationParams;
 use codex_app_server_protocol::JSONRPCErrorError;
@@ -60,6 +61,10 @@ use codex_app_server_protocol::RemoveConversationSubscriptionResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ResumeConversationParams;
 use codex_app_server_protocol::ResumeConversationResponse;
+use codex_app_server_protocol::ReviewDelivery as ApiReviewDelivery;
+use codex_app_server_protocol::ReviewStartParams;
+use codex_app_server_protocol::ReviewStartResponse;
+use codex_app_server_protocol::ReviewTarget;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::SendUserMessageParams;
 use codex_app_server_protocol::SendUserMessageResponse;
@@ -81,6 +86,7 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::Turn;
+use codex_app_server_protocol::TurnError;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
@@ -89,6 +95,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInfoResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_app_server_protocol::UserSavedConfig;
+use codex_app_server_protocol::build_turns_from_event_msgs;
 use codex_backend_client::Client as BackendClient;
 use codex_core::AuthManager;
 use codex_core::CodexConversation;
@@ -109,12 +116,15 @@ use codex_core::config_loader::load_config_as_toml;
 use codex_core::default_client::get_codex_user_agent;
 use codex_core::exec::ExecParams;
 use codex_core::exec_env::create_env;
+use codex_core::features::Feature;
 use codex_core::find_conversation_path_by_id_str;
-use codex_core::get_platform_sandbox;
 use codex_core::git_info::git_diff_to_remote;
 use codex_core::parse_cursor;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
+use codex_core::protocol::ReviewDelivery as CoreReviewDelivery;
+use codex_core::protocol::ReviewRequest;
+use codex_core::protocol::SessionConfiguredEvent;
 use codex_core::read_head_for_summary;
 use codex_feedback::CodexFeedback;
 use codex_login::ServerOptions as LoginServerOptions;
@@ -124,7 +134,7 @@ use codex_protocol::ConversationId;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::GitInfo;
+use codex_protocol::protocol::GitInfo as CoreGitInfo;
 use codex_protocol::protocol::RateLimitSnapshot as CoreRateLimitSnapshot;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionMetaLine;
@@ -132,6 +142,7 @@ use codex_protocol::protocol::USER_MESSAGE_BEGIN;
 use codex_protocol::user_input::UserInput as CoreInputItem;
 use codex_utils_json_to_toml::json_to_toml;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::Error as IoError;
 use std::path::Path;
@@ -150,6 +161,15 @@ use uuid::Uuid;
 
 type PendingInterruptQueue = Vec<(RequestId, ApiVersion)>;
 pub(crate) type PendingInterrupts = Arc<Mutex<HashMap<ConversationId, PendingInterruptQueue>>>;
+
+/// Per-conversation accumulation of the latest states e.g. error message while a turn runs.
+#[derive(Default, Clone)]
+pub(crate) struct TurnSummary {
+    pub(crate) file_change_started: HashSet<String>,
+    pub(crate) last_error: Option<TurnError>,
+}
+
+pub(crate) type TurnSummaryStore = Arc<Mutex<HashMap<ConversationId, TurnSummary>>>;
 
 // Duration before a ChatGPT login attempt is abandoned.
 const LOGIN_CHATGPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -175,6 +195,7 @@ pub(crate) struct CodexMessageProcessor {
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
     // Queue of pending interrupt requests per conversation. We reply when TurnAborted arrives.
     pending_interrupts: PendingInterrupts,
+    turn_summary_store: TurnSummaryStore,
     pending_fuzzy_searches: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     feedback: CodexFeedback,
 }
@@ -227,8 +248,89 @@ impl CodexMessageProcessor {
             conversation_listeners: HashMap::new(),
             active_login: Arc::new(Mutex::new(None)),
             pending_interrupts: Arc::new(Mutex::new(HashMap::new())),
+            turn_summary_store: Arc::new(Mutex::new(HashMap::new())),
             pending_fuzzy_searches: Arc::new(Mutex::new(HashMap::new())),
             feedback,
+        }
+    }
+
+    fn review_request_from_target(
+        target: ReviewTarget,
+    ) -> Result<(ReviewRequest, String), JSONRPCErrorError> {
+        fn invalid_request(message: String) -> JSONRPCErrorError {
+            JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message,
+                data: None,
+            }
+        }
+
+        match target {
+            // TODO(jif) those messages will be extracted in a follow-up PR.
+            ReviewTarget::UncommittedChanges => Ok((
+                ReviewRequest {
+                    prompt: "Review the current code changes (staged, unstaged, and untracked files) and provide prioritized findings.".to_string(),
+                    user_facing_hint: "current changes".to_string(),
+                },
+                "Review uncommitted changes".to_string(),
+            )),
+            ReviewTarget::BaseBranch { branch } => {
+                let branch = branch.trim().to_string();
+                if branch.is_empty() {
+                    return Err(invalid_request("branch must not be empty".to_string()));
+                }
+                let prompt = format!("Review the code changes against the base branch '{branch}'. Start by finding the merge diff between the current branch and {branch}'s upstream e.g. (`git merge-base HEAD \"$(git rev-parse --abbrev-ref \"{branch}@{{upstream}}\")\"`), then run `git diff` against that SHA to see what changes we would merge into the {branch} branch. Provide prioritized, actionable findings.");
+                let hint = format!("changes against '{branch}'");
+                let display = format!("Review changes against base branch '{branch}'");
+                Ok((
+                    ReviewRequest {
+                        prompt,
+                        user_facing_hint: hint,
+                    },
+                    display,
+                ))
+            }
+            ReviewTarget::Commit { sha, title } => {
+                let sha = sha.trim().to_string();
+                if sha.is_empty() {
+                    return Err(invalid_request("sha must not be empty".to_string()));
+                }
+                let brief_title = title
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty());
+                let prompt = if let Some(title) = brief_title.clone() {
+                    format!("Review the code changes introduced by commit {sha} (\"{title}\"). Provide prioritized, actionable findings.")
+                } else {
+                    format!("Review the code changes introduced by commit {sha}. Provide prioritized, actionable findings.")
+                };
+                let short_sha = sha.chars().take(7).collect::<String>();
+                let hint = format!("commit {short_sha}");
+                let display = if let Some(title) = brief_title {
+                    format!("Review commit {short_sha}: {title}")
+                } else {
+                    format!("Review commit {short_sha}")
+                };
+                Ok((
+                    ReviewRequest {
+                        prompt,
+                        user_facing_hint: hint,
+                    },
+                    display,
+                ))
+            }
+            ReviewTarget::Custom { instructions } => {
+                let trimmed = instructions.trim().to_string();
+                if trimmed.is_empty() {
+                    return Err(invalid_request("instructions must not be empty".to_string()));
+                }
+                Ok((
+                    ReviewRequest {
+                        prompt: trimmed.clone(),
+                        user_facing_hint: trimmed.clone(),
+                    },
+                    trimmed,
+                ))
+            }
         }
     }
 
@@ -262,6 +364,9 @@ impl CodexMessageProcessor {
             }
             ClientRequest::TurnInterrupt { request_id, params } => {
                 self.turn_interrupt(request_id, params).await;
+            }
+            ClientRequest::ReviewStart { request_id, params } => {
+                self.review_start(request_id, params).await;
             }
             ClientRequest::NewConversation { request_id, params } => {
                 // Do not tokio::spawn() to process new_conversation()
@@ -364,6 +469,11 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ExecOneOffCommand { request_id, params } => {
                 self.exec_one_off_command(request_id, params).await;
+            }
+            ClientRequest::ConfigRead { .. }
+            | ClientRequest::ConfigValueWrite { .. }
+            | ClientRequest::ConfigBatchWrite { .. } => {
+                warn!("Config request reached CodexMessageProcessor unexpectedly");
             }
             ClientRequest::GetAccountRateLimits {
                 request_id,
@@ -1063,7 +1173,7 @@ impl CodexMessageProcessor {
         let exec_params = ExecParams {
             command: params.command,
             cwd,
-            timeout_ms,
+            expiration: timeout_ms.into(),
             env,
             with_escalated_permissions: None,
             justification: None,
@@ -1074,13 +1184,6 @@ impl CodexMessageProcessor {
             .sandbox_policy
             .unwrap_or_else(|| self.config.sandbox_policy.clone());
 
-        let sandbox_type = match &effective_policy {
-            codex_core::protocol::SandboxPolicy::DangerFullAccess => {
-                codex_core::exec::SandboxType::None
-            }
-            _ => get_platform_sandbox().unwrap_or(codex_core::exec::SandboxType::None),
-        };
-        tracing::debug!("Sandbox type: {sandbox_type:?}");
         let codex_linux_sandbox_exe = self.config.codex_linux_sandbox_exe.clone();
         let outgoing = self.outgoing.clone();
         let req_id = request_id;
@@ -1089,7 +1192,6 @@ impl CodexMessageProcessor {
         tokio::spawn(async move {
             match codex_core::exec::process_exec_tool_call(
                 exec_params,
-                sandbox_type,
                 &effective_policy,
                 sandbox_cwd.as_path(),
                 &codex_linux_sandbox_exe,
@@ -1135,7 +1237,7 @@ impl CodexMessageProcessor {
         let overrides = ConfigOverrides {
             model,
             config_profile: profile,
-            cwd: cwd.map(PathBuf::from),
+            cwd: cwd.clone().map(PathBuf::from),
             approval_policy,
             sandbox_mode,
             model_provider,
@@ -1147,7 +1249,17 @@ impl CodexMessageProcessor {
             ..Default::default()
         };
 
-        let config = match derive_config_from_params(overrides, cli_overrides).await {
+        // Persist windows sandbox feature.
+        // TODO: persist default config in general.
+        let mut cli_overrides = cli_overrides.unwrap_or_default();
+        if cfg!(windows) && self.config.features.enabled(Feature::WindowsSandbox) {
+            cli_overrides.insert(
+                "features.enable_experimental_windows_sandbox".to_string(),
+                serde_json::json!(true),
+            );
+        }
+
+        let config = match derive_config_from_params(overrides, Some(cli_overrides)).await {
             Ok(config) => config,
             Err(err) => {
                 let error = JSONRPCErrorError {
@@ -1212,8 +1324,12 @@ impl CodexMessageProcessor {
 
         match self.conversation_manager.new_conversation(config).await {
             Ok(new_conv) => {
-                let conversation_id = new_conv.conversation_id;
-                let rollout_path = new_conv.session_configured.rollout_path.clone();
+                let NewConversation {
+                    conversation_id,
+                    session_configured,
+                    ..
+                } = new_conv;
+                let rollout_path = session_configured.rollout_path.clone();
                 let fallback_provider = self.config.model_provider_id.as_str();
 
                 // A bit hacky, but the summary contains a lot of useful information for the thread
@@ -1238,8 +1354,22 @@ impl CodexMessageProcessor {
                     }
                 };
 
+                let SessionConfiguredEvent {
+                    model,
+                    model_provider_id,
+                    cwd,
+                    approval_policy,
+                    sandbox_policy,
+                    ..
+                } = session_configured;
                 let response = ThreadStartResponse {
                     thread: thread.clone(),
+                    model,
+                    model_provider: model_provider_id,
+                    cwd,
+                    approval_policy: approval_policy.into(),
+                    sandbox: sandbox_policy.into(),
+                    reasoning_effort: session_configured.reasoning_effort,
                 };
 
                 // Auto-attach a conversation listener when starting a thread.
@@ -1521,6 +1651,11 @@ impl CodexMessageProcessor {
                 session_configured,
                 ..
             }) => {
+                let SessionConfiguredEvent {
+                    rollout_path,
+                    initial_messages,
+                    ..
+                } = session_configured;
                 // Auto-attach a conversation listener when resuming a thread.
                 if let Err(err) = self
                     .attach_conversation_listener(conversation_id, false, ApiVersion::V2)
@@ -1533,8 +1668,8 @@ impl CodexMessageProcessor {
                     );
                 }
 
-                let thread = match read_summary_from_rollout(
-                    session_configured.rollout_path.as_path(),
+                let mut thread = match read_summary_from_rollout(
+                    rollout_path.as_path(),
                     fallback_model_provider.as_str(),
                 )
                 .await
@@ -1545,14 +1680,27 @@ impl CodexMessageProcessor {
                             request_id,
                             format!(
                                 "failed to load rollout `{}` for conversation {conversation_id}: {err}",
-                                session_configured.rollout_path.display()
+                                rollout_path.display()
                             ),
                         )
                         .await;
                         return;
                     }
                 };
-                let response = ThreadResumeResponse { thread };
+                thread.turns = initial_messages
+                    .as_deref()
+                    .map_or_else(Vec::new, build_turns_from_event_msgs);
+
+                let response = ThreadResumeResponse {
+                    thread,
+                    model: session_configured.model,
+                    model_provider: session_configured.model_provider_id,
+                    cwd: session_configured.cwd,
+                    approval_policy: session_configured.approval_policy.into(),
+                    sandbox: session_configured.sandbox_policy.into(),
+                    reasoning_effort: session_configured.reasoning_effort,
+                };
+
                 self.outgoing.send_response(request_id, response).await;
             }
             Err(err) => {
@@ -1803,6 +1951,15 @@ impl CodexMessageProcessor {
                     include_apply_patch_tool,
                 } = overrides;
 
+                // Persist windows sandbox feature.
+                let mut cli_overrides = cli_overrides.unwrap_or_default();
+                if cfg!(windows) && self.config.features.enabled(Feature::WindowsSandbox) {
+                    cli_overrides.insert(
+                        "features.enable_experimental_windows_sandbox".to_string(),
+                        serde_json::json!(true),
+                    );
+                }
+
                 let overrides = ConfigOverrides {
                     model,
                     config_profile: profile,
@@ -1818,7 +1975,7 @@ impl CodexMessageProcessor {
                     ..Default::default()
                 };
 
-                derive_config_from_params(overrides, cli_overrides).await
+                derive_config_from_params(overrides, Some(cli_overrides)).await
             }
             None => Ok(self.config.as_ref().clone()),
         };
@@ -2272,9 +2429,6 @@ impl CodexMessageProcessor {
             }
         };
 
-        // Keep a copy of v2 inputs for the notification payload.
-        let v2_inputs_for_notif = params.input.clone();
-
         // Map v2 input items to core input items.
         let mapped_items: Vec<CoreInputItem> = params
             .input
@@ -2314,19 +2468,18 @@ impl CodexMessageProcessor {
             Ok(turn_id) => {
                 let turn = Turn {
                     id: turn_id.clone(),
-                    items: vec![ThreadItem::UserMessage {
-                        id: turn_id,
-                        content: v2_inputs_for_notif,
-                    }],
+                    items: vec![],
                     status: TurnStatus::InProgress,
-                    error: None,
                 };
 
                 let response = TurnStartResponse { turn: turn.clone() };
                 self.outgoing.send_response(request_id, response).await;
 
                 // Emit v2 turn/started notification.
-                let notif = TurnStartedNotification { turn };
+                let notif = TurnStartedNotification {
+                    thread_id: params.thread_id,
+                    turn,
+                };
                 self.outgoing
                     .send_server_notification(ServerNotification::TurnStarted(notif))
                     .await;
@@ -2338,6 +2491,224 @@ impl CodexMessageProcessor {
                     data: None,
                 };
                 self.outgoing.send_error(request_id, error).await;
+            }
+        }
+    }
+
+    fn build_review_turn(turn_id: String, display_text: &str) -> Turn {
+        let items = if display_text.is_empty() {
+            Vec::new()
+        } else {
+            vec![ThreadItem::UserMessage {
+                id: turn_id.clone(),
+                content: vec![V2UserInput::Text {
+                    text: display_text.to_string(),
+                }],
+            }]
+        };
+
+        Turn {
+            id: turn_id,
+            items,
+            status: TurnStatus::InProgress,
+        }
+    }
+
+    async fn emit_review_started(
+        &self,
+        request_id: &RequestId,
+        turn: Turn,
+        parent_thread_id: String,
+        review_thread_id: String,
+    ) {
+        let response = ReviewStartResponse {
+            turn: turn.clone(),
+            review_thread_id,
+        };
+        self.outgoing
+            .send_response(request_id.clone(), response)
+            .await;
+
+        let notif = TurnStartedNotification {
+            thread_id: parent_thread_id,
+            turn,
+        };
+        self.outgoing
+            .send_server_notification(ServerNotification::TurnStarted(notif))
+            .await;
+    }
+
+    async fn start_inline_review(
+        &self,
+        request_id: &RequestId,
+        parent_conversation: Arc<CodexConversation>,
+        review_request: ReviewRequest,
+        display_text: &str,
+        parent_thread_id: String,
+    ) -> std::result::Result<(), JSONRPCErrorError> {
+        let turn_id = parent_conversation
+            .submit(Op::Review { review_request })
+            .await;
+
+        match turn_id {
+            Ok(turn_id) => {
+                let turn = Self::build_review_turn(turn_id, display_text);
+                self.emit_review_started(
+                    request_id,
+                    turn,
+                    parent_thread_id.clone(),
+                    parent_thread_id,
+                )
+                .await;
+                Ok(())
+            }
+            Err(err) => Err(JSONRPCErrorError {
+                code: INTERNAL_ERROR_CODE,
+                message: format!("failed to start review: {err}"),
+                data: None,
+            }),
+        }
+    }
+
+    async fn start_detached_review(
+        &mut self,
+        request_id: &RequestId,
+        parent_conversation_id: ConversationId,
+        review_request: ReviewRequest,
+        display_text: &str,
+    ) -> std::result::Result<(), JSONRPCErrorError> {
+        let rollout_path = find_conversation_path_by_id_str(
+            &self.config.codex_home,
+            &parent_conversation_id.to_string(),
+        )
+        .await
+        .map_err(|err| JSONRPCErrorError {
+            code: INTERNAL_ERROR_CODE,
+            message: format!("failed to locate conversation id {parent_conversation_id}: {err}"),
+            data: None,
+        })?
+        .ok_or_else(|| JSONRPCErrorError {
+            code: INVALID_REQUEST_ERROR_CODE,
+            message: format!("no rollout found for conversation id {parent_conversation_id}"),
+            data: None,
+        })?;
+
+        let mut config = self.config.as_ref().clone();
+        config.model = self.config.review_model.clone();
+
+        let NewConversation {
+            conversation_id,
+            conversation,
+            session_configured,
+            ..
+        } = self
+            .conversation_manager
+            .fork_conversation(usize::MAX, config, rollout_path)
+            .await
+            .map_err(|err| JSONRPCErrorError {
+                code: INTERNAL_ERROR_CODE,
+                message: format!("error creating detached review conversation: {err}"),
+                data: None,
+            })?;
+
+        if let Err(err) = self
+            .attach_conversation_listener(conversation_id, false, ApiVersion::V2)
+            .await
+        {
+            tracing::warn!(
+                "failed to attach listener for review conversation {}: {}",
+                conversation_id,
+                err.message
+            );
+        }
+
+        let rollout_path = conversation.rollout_path();
+        let fallback_provider = self.config.model_provider_id.as_str();
+        match read_summary_from_rollout(rollout_path.as_path(), fallback_provider).await {
+            Ok(summary) => {
+                let thread = summary_to_thread(summary);
+                let notif = ThreadStartedNotification { thread };
+                self.outgoing
+                    .send_server_notification(ServerNotification::ThreadStarted(notif))
+                    .await;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "failed to load summary for review conversation {}: {}",
+                    session_configured.session_id,
+                    err
+                );
+            }
+        }
+
+        let turn_id = conversation
+            .submit(Op::Review { review_request })
+            .await
+            .map_err(|err| JSONRPCErrorError {
+                code: INTERNAL_ERROR_CODE,
+                message: format!("failed to start detached review turn: {err}"),
+                data: None,
+            })?;
+
+        let turn = Self::build_review_turn(turn_id, display_text);
+        let review_thread_id = conversation_id.to_string();
+        self.emit_review_started(request_id, turn, review_thread_id.clone(), review_thread_id)
+            .await;
+
+        Ok(())
+    }
+
+    async fn review_start(&mut self, request_id: RequestId, params: ReviewStartParams) {
+        let ReviewStartParams {
+            thread_id,
+            target,
+            delivery,
+        } = params;
+        let (parent_conversation_id, parent_conversation) =
+            match self.conversation_from_thread_id(&thread_id).await {
+                Ok(v) => v,
+                Err(error) => {
+                    self.outgoing.send_error(request_id, error).await;
+                    return;
+                }
+            };
+
+        let (review_request, display_text) = match Self::review_request_from_target(target) {
+            Ok(value) => value,
+            Err(err) => {
+                self.outgoing.send_error(request_id, err).await;
+                return;
+            }
+        };
+
+        let delivery = delivery.unwrap_or(ApiReviewDelivery::Inline).to_core();
+        match delivery {
+            CoreReviewDelivery::Inline => {
+                if let Err(err) = self
+                    .start_inline_review(
+                        &request_id,
+                        parent_conversation,
+                        review_request,
+                        display_text.as_str(),
+                        thread_id.clone(),
+                    )
+                    .await
+                {
+                    self.outgoing.send_error(request_id, err).await;
+                }
+            }
+            CoreReviewDelivery::Detached => {
+                if let Err(err) = self
+                    .start_detached_review(
+                        &request_id,
+                        parent_conversation_id,
+                        review_request,
+                        display_text.as_str(),
+                    )
+                    .await
+                {
+                    self.outgoing.send_error(request_id, err).await;
+                }
             }
         }
     }
@@ -2441,6 +2812,7 @@ impl CodexMessageProcessor {
 
         let outgoing_for_task = self.outgoing.clone();
         let pending_interrupts = self.pending_interrupts.clone();
+        let turn_summary_store = self.turn_summary_store.clone();
         let api_version_for_task = api_version;
         tokio::spawn(async move {
             loop {
@@ -2497,6 +2869,7 @@ impl CodexMessageProcessor {
                             conversation.clone(),
                             outgoing_for_task.clone(),
                             pending_interrupts.clone(),
+                            turn_summary_store.clone(),
                             api_version_for_task,
                         )
                         .await;
@@ -2587,6 +2960,7 @@ impl CodexMessageProcessor {
         } else {
             None
         };
+        let session_source = self.conversation_manager.session_source();
 
         let upload_result = tokio::task::spawn_blocking(move || {
             let rollout_path_ref = validated_rollout_path.as_deref();
@@ -2595,6 +2969,7 @@ impl CodexMessageProcessor {
                 reason.as_deref(),
                 include_logs,
                 rollout_path_ref,
+                Some(session_source),
             )
         })
         .await;
@@ -2716,7 +3091,7 @@ fn extract_conversation_summary(
     path: PathBuf,
     head: &[serde_json::Value],
     session_meta: &SessionMeta,
-    git: Option<&GitInfo>,
+    git: Option<&CoreGitInfo>,
     fallback_provider: &str,
 ) -> Option<ConversationSummary> {
     let preview = head
@@ -2757,7 +3132,7 @@ fn extract_conversation_summary(
     })
 }
 
-fn map_git_info(git_info: &GitInfo) -> ConversationGitInfo {
+fn map_git_info(git_info: &CoreGitInfo) -> ConversationGitInfo {
     ConversationGitInfo {
         sha: git_info.commit_hash.clone(),
         branch: git_info.branch.clone(),
@@ -2780,10 +3155,18 @@ fn summary_to_thread(summary: ConversationSummary) -> Thread {
         preview,
         timestamp,
         model_provider,
-        ..
+        cwd,
+        cli_version,
+        source,
+        git_info,
     } = summary;
 
     let created_at = parse_datetime(timestamp.as_deref());
+    let git_info = git_info.map(|info| ApiGitInfo {
+        sha: info.sha,
+        branch: info.branch,
+        origin_url: info.origin_url,
+    });
 
     Thread {
         id: conversation_id.to_string(),
@@ -2791,6 +3174,11 @@ fn summary_to_thread(summary: ConversationSummary) -> Thread {
         model_provider,
         created_at: created_at.map(|dt| dt.timestamp()).unwrap_or(0),
         path,
+        cwd,
+        cli_version,
+        source: source.into(),
+        git_info,
+        turns: Vec::new(),
     }
 }
 

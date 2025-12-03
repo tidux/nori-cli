@@ -35,11 +35,33 @@ jobs:
           targets: ${{ matrix.target }}
           components: clippy
 
-      - name: Install nightly rustfmt
-        run: rustup toolchain install nightly --component rustfmt --profile minimal
+      - name: Compute lockfile hash
+        id: lockhash
+        working-directory: codex-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "hash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "toolchain_hash=$(sha256sum rust-toolchain.toml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      # sccache setup
+      # Explicit cache restore: split cargo home vs target, so we can
+      # avoid caching the large target dir on the gnu-dev job.
+      - name: Restore cargo home cache
+        id: cache_cargo_home_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          restore-keys: |
+            cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
+
+      # Install and restore sccache cache
       - name: Install sccache
+        if: ${{ env.USE_SCCACHE == 'true' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2
         with:
           tool: sccache
