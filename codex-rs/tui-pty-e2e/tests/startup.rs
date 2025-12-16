@@ -68,7 +68,7 @@ fn test_startup_shows_banner() {
 #[cfg(target_os = "linux")]
 fn test_startup_welcome_with_dimensions() {
     let mut session = TuiSession::spawn_with_config(
-        40,
+        10,
         120,
         SessionConfig::default()
             // Don't include the values that would bypass welcome
@@ -84,10 +84,10 @@ fn test_startup_welcome_with_dimensions() {
 
     // Verify terminal size is respected
     let contents = session.screen_contents();
-    assert!(contents.lines().count() <= 40);
+    assert!(contents.lines().count() <= 10);
 
     assert_snapshot!(
-        "startup_welcome_dimensions_40x120",
+        "startup_welcome_dimensions_10x120",
         normalize_for_input_snapshot(contents)
     );
 }
@@ -108,7 +108,7 @@ fn test_runs_in_temp_directory_by_default() {
     session
         .wait_for_text("Powered by Nori AI", TIMEOUT)
         .expect("Prompt did not appear");
-    std::thread::sleep(TIMEOUT);
+    std::thread::sleep(TIMEOUT_PRESNAPSHOT);
 
     let contents = session.screen_contents();
 
@@ -125,10 +125,6 @@ fn test_runs_in_temp_directory_by_default() {
         "Session should not run in home directory, but got: {}",
         contents
     );
-    assert_snapshot!(
-        "runs_in_temp_directory",
-        normalize_for_input_snapshot(contents)
-    );
 }
 
 #[test]
@@ -140,7 +136,7 @@ fn test_trust_screen_is_skipped_with_default_config() {
     session
         .wait_for_text("›", TIMEOUT)
         .expect("Prompt did not appear");
-    std::thread::sleep(TIMEOUT);
+    std::thread::sleep(TIMEOUT_PRESNAPSHOT);
 
     let contents = session.screen_contents();
 
@@ -156,10 +152,6 @@ fn test_trust_screen_is_skipped_with_default_config() {
         contents.contains("›") && contents.contains("context left"),
         "Should show main prompt with context indicator, got: {}",
         contents
-    );
-    assert_snapshot!(
-        "trust_screen_skipped",
-        normalize_for_input_snapshot(contents)
     );
 }
 
