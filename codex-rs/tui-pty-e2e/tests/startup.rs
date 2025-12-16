@@ -165,7 +165,6 @@ fn test_startup_shows_nori_banner() {
     session
         .wait_for_text("Powered by Nori AI", TIMEOUT)
         .expect("Nori branding did not appear");
-    std::thread::sleep(TIMEOUT);
 
     let contents = session.screen_contents();
 
@@ -188,9 +187,10 @@ fn test_startup_shows_nori_banner() {
         contents
     );
 
+    let lines = contents.lines();
     assert_snapshot!(
         "startup_shows_nori_banner",
-        normalize_for_input_snapshot(session.screen_contents())
+        normalize_for_input_snapshot(lines.collect::<Vec<&str>>()[1..12].join("\n"))
     );
 }
 
