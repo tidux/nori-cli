@@ -141,6 +141,7 @@ jobs:
 
       - name: Run cargo clippy
         working-directory: codex-rs
+        # needs all features to avoid unused import/var/etc errors
         run: cargo clippy --all-targets
 
       - name: Run cargo test
