@@ -400,8 +400,15 @@ jobs:
     # Only publish for actual tag pushes, not workflow_dispatch (which is dry run only)
     if: ${{ !failure() && !cancelled() && github.event_name == 'push' }}
     runs-on: ubuntu-24.04
-    environment: npm-publish
+    permissions:
+      contents: read      # Required to checkout code
+      id-token: write     # Required for OIDC Trusted Publishing
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.checkout_ref }}
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -431,16 +438,14 @@ jobs:
           fi
 
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${{ needs.validate.outputs.version }}"
           IS_PRERELEASE="${{ needs.validate.outputs.is_prerelease }}"
 
-          # Find the tarball
-          TARBALL=$(ls dist/*.tgz | head -1)
+          # Find the tarball - use ./ prefix to force local path resolution
+          TARBALL="./$(ls dist/*.tgz | head -1)"
 
-          if [[ -z "$TARBALL" ]]; then
+          if [[ -z "$TARBALL" || "$TARBALL" == "./" ]]; then
             echo "::error::No tarball found in dist/"
             exit 1
           fi
@@ -453,8 +458,8 @@ jobs:
             NPM_TAG="next"
           fi
 
-          # Publish with appropriate tag
-          npm publish "$TARBALL" --tag "$NPM_TAG" --access public
+          # Publish with provenance for Trusted Publishing
+          npm publish "$TARBALL" --tag "$NPM_TAG" --access public --provenance
 
           echo "## npm Publish Complete" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
