@@ -18,6 +18,7 @@
 #
 # For testing the build process without releasing:
 #   gh workflow run nori-release.yml -f version=0.2.0 -f dry_run=true
+#   gh workflow run nori-release.yml -f version=0.2.0 -f dry_run=true -f skip_tests=true
 #
 name: Nori Release
 
@@ -35,6 +36,11 @@ on:
         description: 'Dry run mode (builds but does not publish)'
         required: false
         default: true
+        type: boolean
+      skip_tests:
+        description: 'Skip running tests (for faster build testing)'
+        required: false
+        default: false
         type: boolean
 
 env:
@@ -56,6 +62,7 @@ jobs:
       is_prerelease: ${{ steps.validate.outputs.is_prerelease }}
       is_tag_push: ${{ steps.validate.outputs.is_tag_push }}
       checkout_ref: ${{ steps.validate.outputs.checkout_ref }}
+      skip_tests: ${{ steps.validate.outputs.skip_tests }}
     steps:
       - name: Validate version and determine refs
         id: validate
@@ -94,6 +101,13 @@ jobs:
           echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
           echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
 
+          # Determine if tests should be skipped (only for workflow_dispatch)
+          SKIP_TESTS="false"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.skip_tests }}" == "true" ]]; then
+            SKIP_TESTS="true"
+          fi
+          echo "skip_tests=$SKIP_TESTS" >> "$GITHUB_OUTPUT"
+
           echo "## Release Validation" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Property | Value |" >> "$GITHUB_STEP_SUMMARY"
@@ -105,6 +119,7 @@ jobs:
           echo "| Checkout Ref | \`$CHECKOUT_REF\` |" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "| Mode | Dry Run (build test only) |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Skip Tests | $SKIP_TESTS |" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   # ============================================================================
@@ -113,6 +128,7 @@ jobs:
   test:
     name: Run Tests
     needs: validate
+    if: ${{ needs.validate.outputs.skip_tests != 'true' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository

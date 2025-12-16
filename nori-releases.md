@@ -176,6 +176,14 @@ gh workflow run nori-release.yml -f version=0.2.0 -f dry_run=true
 
 This builds everything but doesn't publish or create tags.
 
+To skip tests during a dry run (for faster iteration on build issues):
+
+```bash
+gh workflow run nori-release.yml -f version=0.2.0 -f dry_run=true -f skip_tests=true
+```
+
+Note: Tests are always run for actual releases (tag pushes). The `skip_tests` flag only works with `workflow_dispatch` dry runs.
+
 ### npm Package
 
 - **Package name:** `nori-ai-cli`
