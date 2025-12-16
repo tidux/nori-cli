@@ -771,16 +771,24 @@ pub fn normalize_for_snapshot(contents: String) -> String {
                 let rest = &line[label_end..];
                 if let Some(val_offset) = rest.find(|c: char| !c.is_whitespace()) {
                     let val_start = label_end + val_offset;
-                    // Find the end of the profile value (whitespace or end of line)
+                    // Find the end of the content region (border character or end of line)
+                    // We need to replace value + trailing spaces to ensure consistent width
                     let val_rest = &line[val_start..];
-                    let val_end = val_rest
-                        .find(char::is_whitespace)
-                        .map_or(line.len(), |pos| val_start + pos);
+                    let region_end = val_rest.find('│').map_or(line.len(), |pos| val_start + pos);
 
-                    let profile_value = &line[val_start..val_end];
-                    if !profile_value.is_empty() {
-                        let replacement = "[PROF]";
-                        line.replace_range(val_start..val_end, replacement);
+                    // Calculate padding to maintain consistent width
+                    let region_width = region_end - val_start;
+                    let replacement = "[PROF]";
+                    if region_width >= replacement.len() {
+                        let padded = format!(
+                            "{}{}",
+                            replacement,
+                            " ".repeat(region_width - replacement.len())
+                        );
+                        line.replace_range(val_start..region_end, &padded);
+                    } else {
+                        // Region too small for replacement, just use [PROF]
+                        line.replace_range(val_start..region_end, replacement);
                     }
                 }
             }

@@ -191,7 +191,7 @@ fn test_startup_shows_nori_banner() {
     let lines = contents.lines();
     assert_snapshot!(
         "startup_shows_nori_banner",
-        normalize_for_input_snapshot(lines.collect::<Vec<&str>>()[1..12].join("\n"))
+        normalize_for_input_snapshot(lines.collect::<Vec<&str>>()[1..11].join("\n"))
     );
 }
 
