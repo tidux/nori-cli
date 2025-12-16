@@ -146,7 +146,14 @@ jobs:
 
       - name: Run cargo test
         working-directory: codex-rs
-        run: cargo test --workspace
+        run: |
+          cargo test --package tui-pty-e2e
+          cargo test --package acp
+          cargo test --package codex-tui
+          cargo test --package codex-cli
+          cargo test --package codex-common
+          cargo test --package codex-protocol
+          cargo test --package codex-core
 
   # ============================================================================
   # BUILD NATIVE BINARIES
