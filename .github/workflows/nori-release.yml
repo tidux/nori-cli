@@ -414,6 +414,7 @@ jobs:
     # Only publish for actual tag pushes, not workflow_dispatch (which is dry run only)
     if: ${{ !failure() && !cancelled() && github.event_name == 'push' }}
     runs-on: ubuntu-24.04
+    environment: npm-publish
     permissions:
       contents: read      # Required to checkout code
       id-token: write     # Required for OIDC Trusted Publishing
@@ -472,8 +473,8 @@ jobs:
             NPM_TAG="next"
           fi
 
-          # Publish with provenance for Trusted Publishing
-          npm publish "$TARBALL" --tag "$NPM_TAG" --access public --provenance
+          # Publish with OIDC Trusted Publishing (no --provenance for private repos)
+          npm publish "$TARBALL" --tag "$NPM_TAG" --access public
 
           echo "## npm Publish Complete" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
