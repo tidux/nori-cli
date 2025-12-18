@@ -200,14 +200,15 @@ jobs:
           - os: macos-14
             target: x86_64-apple-darwin
             artifact-name: darwin-x86_64
-          - os: ubuntu-24.04
-            target: aarch64-linux-android
-            artifact-name: android-arm64
-            use-ndk: true
-          - os: ubuntu-24.04
-            target: x86_64-linux-android
-            artifact-name: android-x86_64
-            use-ndk: true
+          # Android targets temporarily disabled - OpenSSL cross-compilation needs more work
+          # - os: ubuntu-24.04
+          #   target: aarch64-linux-android
+          #   artifact-name: android-arm64
+          #   use-ndk: true
+          # - os: ubuntu-24.04
+          #   target: x86_64-linux-android
+          #   artifact-name: android-x86_64
+          #   use-ndk: true
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
