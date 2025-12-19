@@ -1,5 +1,7 @@
-use super::new_status_output;
-use super::rate_limit_snapshot_display;
+#![allow(clippy::expect_used)]
+
+use super::card::new_status_output;
+use super::rate_limits::rate_limit_snapshot_display;
 use crate::history_cell::HistoryCell;
 use chrono::Duration as ChronoDuration;
 use chrono::TimeZone;

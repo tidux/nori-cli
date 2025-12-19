@@ -2458,16 +2458,17 @@ mod tests {
             true,
             sender,
             false,
-            "Ask Codex to do anything".to_string(),
+            "Ask Nori to do anything".to_string(),
             false,
         );
 
-        type_chars_humanlike(&mut composer, &['/', 'c']);
+        // Use /di to match /diff (always visible), not /compact (gated by codex-features)
+        type_chars_humanlike(&mut composer, &['/', 'd', 'i']);
 
         let (_result, _needs_redraw) =
             composer.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
-        assert_eq!(composer.textarea.text(), "/compact ");
+        assert_eq!(composer.textarea.text(), "/diff ");
         assert_eq!(composer.textarea.cursor(), composer.textarea.text().len());
     }
 
@@ -2479,7 +2480,7 @@ mod tests {
             true,
             sender,
             false,
-            "Ask Codex to do anything".to_string(),
+            "Ask Nori to do anything".to_string(),
             false,
         );
 

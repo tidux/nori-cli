@@ -243,15 +243,9 @@ impl TuiSession {
         cmd.arg("--model");
         cmd.arg(&config.model);
 
-        // Set approval policy if specified (also sets sandbox to allow test execution)
-        if let Some(approval) = &config.approval_policy {
-            cmd.arg("--ask-for-approval");
-            cmd.arg(approval.as_str());
-        }
-        // Also set sandbox to workspace-write to allow file operations in tests
-        if let Some(sandbox) = &config.sandbox {
-            cmd.arg("--sandbox");
-            cmd.arg(sandbox.as_str());
+        // Skip trust directory prompt for E2E tests (avoids interactive prompts)
+        if config.skip_trust_directory {
+            cmd.arg("--skip-trust-directory");
         }
 
         // Set TERM to enable terminal features
@@ -643,56 +637,14 @@ fn find_acp_log_file(nori_home: &std::path::Path) -> Option<std::path::PathBuf> 
         .map(|entry| entry.path())
 }
 
-/// Sandbox policy for codex session
-#[derive(Debug, Clone, Copy)]
-pub enum Sandbox {
-    // [possible values: read-only, workspace-write, danger-full-access]
-    ReadOnly,
-    WorkspaceWrite,
-    DangerFullAccess,
-}
-
-impl Sandbox {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Sandbox::ReadOnly => "read-only",
-            Sandbox::WorkspaceWrite => "workspace-write",
-            Sandbox::DangerFullAccess => "danger-full-access",
-        }
-    }
-}
-
-/// Approval policy for codex session
-#[derive(Debug, Clone, Copy)]
-pub enum ApprovalPolicy {
-    /// Only run trusted commands without approval
-    Untrusted,
-    /// Run all commands, ask for approval on failure
-    OnFailure,
-    /// Model decides when to ask
-    OnRequest,
-    /// Never ask for approval
-    Never,
-}
-
-impl ApprovalPolicy {
-    fn as_str(&self) -> &'static str {
-        match self {
-            ApprovalPolicy::Untrusted => "untrusted",
-            ApprovalPolicy::OnFailure => "on-failure",
-            ApprovalPolicy::OnRequest => "on-request",
-            ApprovalPolicy::Never => "never",
-        }
-    }
-}
-
 /// Configuration for spawning a test session
 pub struct SessionConfig {
     pub model: String,
     pub mock_agent_env: HashMap<String, String>,
     pub no_color: bool,
-    pub approval_policy: Option<ApprovalPolicy>,
-    pub sandbox: Option<Sandbox>,
+    /// Skip the trust directory prompt (passes --skip-trust-directory flag).
+    /// Enabled by default for E2E tests to avoid interactive prompts.
+    pub skip_trust_directory: bool,
     pub cwd: Option<std::path::PathBuf>,
     /// Custom config.toml content. If None, a default config will be generated.
     /// Set to Some("") to write an empty config file.
@@ -723,9 +675,7 @@ impl SessionConfig {
             model: "mock-model".to_string(),
             mock_agent_env: HashMap::new(),
             no_color: true,
-            approval_policy: Some(ApprovalPolicy::OnFailure),
-            // [possible values: read-only, workspace-write, danger-full-access]
-            sandbox: Some(Sandbox::WorkspaceWrite),
+            skip_trust_directory: true, // Skip trust prompt by default for E2E tests
             cwd: None,
             config_toml: None,
             git_init: true,
@@ -773,23 +723,10 @@ impl SessionConfig {
         self
     }
 
-    pub fn with_approval_policy(mut self, policy: ApprovalPolicy) -> Self {
-        self.approval_policy = Some(policy);
-        self
-    }
-
-    pub fn without_approval_policy(mut self) -> Self {
-        self.approval_policy = None;
-        self
-    }
-
-    pub fn with_sandbox(mut self, sandbox: Sandbox) -> Self {
-        self.sandbox = Some(sandbox);
-        self
-    }
-
-    pub fn without_sandbox(mut self) -> Self {
-        self.sandbox = None;
+    /// Enable or disable the --skip-trust-directory flag.
+    /// Enabled by default; use `with_skip_trust_directory(false)` to test trust prompts.
+    pub fn with_skip_trust_directory(mut self, skip: bool) -> Self {
+        self.skip_trust_directory = skip;
         self
     }
 
@@ -827,7 +764,7 @@ fn codex_binary_path() -> String {
         .parent() // deps
         .and_then(|p| p.parent()) // debug or release
         .expect("Failed to get target directory")
-        .join("codex")
+        .join("nori")
         .to_string_lossy()
         .into_owned()
 }

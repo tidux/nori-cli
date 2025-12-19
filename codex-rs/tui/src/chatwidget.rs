@@ -2148,20 +2148,9 @@ impl ChatWidget {
     }
 
     pub(crate) fn add_status_output(&mut self) {
-        let default_usage = TokenUsage::default();
-        let (total_usage, context_usage) = if let Some(ti) = &self.token_info {
-            (&ti.total_token_usage, Some(&ti.last_token_usage))
-        } else {
-            (&default_usage, Some(&default_usage))
-        };
-        self.add_to_history(crate::status::new_status_output(
-            &self.config,
-            self.auth_manager.as_ref(),
-            total_usage,
-            context_usage,
-            &self.conversation_id,
-            self.rate_limit_snapshot.as_ref(),
-            Local::now(),
+        self.add_to_history(crate::nori::session_header::new_nori_status_output(
+            &self.config.model,
+            self.config.cwd.clone(),
         ));
     }
     fn stop_rate_limit_poller(&mut self) {
@@ -2815,7 +2804,7 @@ impl ChatWidget {
         let mut header_children: Vec<Box<dyn Renderable>> = Vec::new();
         let title_line = Line::from("Enable full access?").bold();
         let info_line = Line::from(vec![
-            "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. "
+            "When Nori runs with full access, it can edit any file on your computer and run commands with network, without your approval."
                 .into(),
             "Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior."
                 .fg(Color::Red),
@@ -2993,7 +2982,7 @@ impl ChatWidget {
             Paragraph::new(vec![
                 line!["Agent mode on Windows uses an experimental sandbox to limit network and filesystem access.".bold()],
                 line![
-                    "Learn more: https://developers.openai.com/codex/windows"
+                    "Learn more: https://github.com/tilework-tech/nori-cli/blob/main/docs/windows.md"
                 ],
             ])
             .wrap(Wrap { trim: false }),
@@ -3454,7 +3443,7 @@ impl Notification {
             }
             Notification::EditApprovalRequested { cwd, changes } => {
                 format!(
-                    "Codex wants to edit {}",
+                    "Nori wants to edit {}",
                     if changes.len() == 1 {
                         #[allow(clippy::unwrap_used)]
                         display_path_for(changes.first().unwrap(), cwd)

@@ -27,6 +27,7 @@ use codex_cli::login::run_logout;
 #[cfg(feature = "cloud-tasks")]
 use codex_cloud_tasks::Cli as CloudTasksCli;
 use codex_common::CliConfigOverrides;
+#[cfg(feature = "codex-features")]
 use codex_exec::Cli as ExecCli;
 use codex_execpolicy::ExecPolicyCheckCommand;
 #[cfg(feature = "responses-api-proxy")]
@@ -46,11 +47,14 @@ mod wsl_paths;
 #[cfg(feature = "mcp-server")]
 use crate::mcp_cmd::McpCli;
 
+#[cfg(feature = "codex-features")]
 use codex_core::config::Config;
+#[cfg(feature = "codex-features")]
 use codex_core::config::ConfigOverrides;
+#[cfg(feature = "codex-features")]
 use codex_core::features::is_known_feature_key;
 
-/// Codex CLI
+/// Nori CLI
 ///
 /// If no subcommand is specified, options will be forwarded to the interactive CLI.
 #[derive(Debug, Parser)]
@@ -62,8 +66,8 @@ use codex_core::features::is_known_feature_key;
     // The executable is sometimes invoked via a platform‑specific name like
     // `codex-x86_64-unknown-linux-musl`, but the help output should always use
     // the generic `codex` command name that users run.
-    bin_name = "codex",
-    override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
+    bin_name = "nori",
+    override_usage = "nori [OPTIONS] [PROMPT]\n       nori [OPTIONS] <COMMAND> [ARGS]"
 )]
 struct MultitoolCli {
     #[clap(flatten)]
@@ -82,6 +86,7 @@ struct MultitoolCli {
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
     /// Run Codex non-interactively.
+    #[cfg(feature = "codex-features")]
     #[clap(visible_alias = "e")]
     Exec(ExecCli),
 
@@ -108,7 +113,7 @@ enum Subcommand {
     /// Generate shell completion scripts.
     Completion(CompletionCommand),
 
-    /// Run commands within a Codex-provided sandbox.
+    /// Run commands within a Nori-provided sandbox.
     #[clap(visible_alias = "debug")]
     Sandbox(SandboxArgs),
 
@@ -122,6 +127,7 @@ enum Subcommand {
     Apply(ApplyCommand),
 
     /// Resume a previous interactive session (picker by default; use --last to continue the most recent).
+    #[cfg(feature = "codex-features")]
     Resume(ResumeCommand),
 
     /// [EXPERIMENTAL] Browse tasks from Codex Cloud and apply changes locally.
@@ -139,6 +145,7 @@ enum Subcommand {
     StdioToUds(StdioToUdsCommand),
 
     /// Inspect feature flags.
+    #[cfg(feature = "codex-features")]
     Features(FeaturesCli),
 }
 
@@ -149,6 +156,7 @@ struct CompletionCommand {
     shell: Shell,
 }
 
+#[cfg(feature = "codex-features")]
 #[derive(Debug, Parser)]
 struct ResumeCommand {
     /// Conversation/session id (UUID). When provided, resumes this session.
@@ -313,7 +321,7 @@ fn format_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<Stri
     )];
 
     if let Some(session_id) = conversation_id {
-        let resume_cmd = format!("codex resume {session_id}");
+        let resume_cmd = format!("nori resume {session_id}");
         let command = if color_enabled {
             resume_cmd.cyan().to_string()
         } else {
@@ -380,15 +388,18 @@ fn run_execpolicycheck(cmd: ExecPolicyCheckCommand) -> anyhow::Result<()> {
 #[derive(Debug, Default, Parser, Clone)]
 struct FeatureToggles {
     /// Enable a feature (repeatable). Equivalent to `-c features.<name>=true`.
+    #[cfg(feature = "codex-features")]
     #[arg(long = "enable", value_name = "FEATURE", action = clap::ArgAction::Append, global = true)]
     enable: Vec<String>,
 
     /// Disable a feature (repeatable). Equivalent to `-c features.<name>=false`.
+    #[cfg(feature = "codex-features")]
     #[arg(long = "disable", value_name = "FEATURE", action = clap::ArgAction::Append, global = true)]
     disable: Vec<String>,
 }
 
 impl FeatureToggles {
+    #[cfg(feature = "codex-features")]
     fn to_overrides(&self) -> anyhow::Result<Vec<String>> {
         let mut v = Vec::new();
         for feature in &self.enable {
@@ -402,6 +413,12 @@ impl FeatureToggles {
         Ok(v)
     }
 
+    #[cfg(not(feature = "codex-features"))]
+    fn to_overrides(&self) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    #[cfg(feature = "codex-features")]
     fn validate_feature(feature: &str) -> anyhow::Result<()> {
         if is_known_feature_key(feature) {
             Ok(())
@@ -411,18 +428,21 @@ impl FeatureToggles {
     }
 }
 
+#[cfg(feature = "codex-features")]
 #[derive(Debug, Parser)]
 struct FeaturesCli {
     #[command(subcommand)]
     sub: FeaturesSubcommand,
 }
 
+#[cfg(feature = "codex-features")]
 #[derive(Debug, Parser)]
 enum FeaturesSubcommand {
     /// List known features with their stage and effective state.
     List,
 }
 
+#[cfg(feature = "codex-features")]
 fn stage_str(stage: codex_core::features::Stage) -> &'static str {
     use codex_core::features::Stage;
     match stage {
@@ -499,6 +519,7 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             let exit_info = codex_tui::run_main(interactive, codex_linux_sandbox_exe).await?;
             handle_app_exit(exit_info)?;
         }
+        #[cfg(feature = "codex-features")]
         Some(Subcommand::Exec(mut exec_cli)) => {
             prepend_config_flags(
                 &mut exec_cli.config_overrides,
@@ -531,6 +552,7 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 codex_app_server_protocol::generate_json(&gen_cli.out_dir)?;
             }
         },
+        #[cfg(feature = "codex-features")]
         Some(Subcommand::Resume(ResumeCommand {
             session_id,
             last,
@@ -655,6 +677,7 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             tokio::task::spawn_blocking(move || codex_stdio_to_uds::run(socket_path.as_path()))
                 .await??;
         }
+        #[cfg(feature = "codex-features")]
         Some(Subcommand::Features(FeaturesCli { sub })) => match sub {
             FeaturesSubcommand::List => {
                 // Respect root-level `-c` overrides plus top-level flags like `--profile`.
@@ -702,6 +725,7 @@ fn prepend_config_flags(
 }
 
 /// Build the final `TuiCli` for a `codex resume` invocation.
+#[cfg(feature = "codex-features")]
 fn finalize_resume_interactive(
     mut interactive: TuiCli,
     root_config_overrides: CliConfigOverrides,
@@ -730,6 +754,7 @@ fn finalize_resume_interactive(
 /// Merge flags provided to `codex resume` so they take precedence over any
 /// root-level flags. Only overrides fields explicitly set on the resume-scoped
 /// CLI. Also appends `-c key=value` overrides with highest precedence.
+#[cfg(feature = "codex-features")]
 fn merge_resume_cli_flags(interactive: &mut TuiCli, resume_cli: TuiCli) {
     if let Some(model) = resume_cli.model {
         interactive.model = Some(model);
@@ -776,18 +801,20 @@ fn merge_resume_cli_flags(interactive: &mut TuiCli, resume_cli: TuiCli) {
 
 fn print_completion(cmd: CompletionCommand) {
     let mut app = MultitoolCli::command();
-    let name = "codex";
+    let name = "nori";
     generate(cmd.shell, &mut app, name, &mut std::io::stdout());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "codex-features")]
     use assert_matches::assert_matches;
     use codex_core::protocol::TokenUsage;
     use codex_protocol::ConversationId;
     use pretty_assertions::assert_eq;
 
+    #[cfg(feature = "codex-features")]
     fn finalize_from_args(args: &[&str]) -> TuiCli {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
@@ -851,7 +878,7 @@ mod tests {
             lines,
             vec![
                 "Token usage: total=2 input=0 output=2".to_string(),
-                "To continue this session, run codex resume 123e4567-e89b-12d3-a456-426614174000"
+                "To continue this session, run nori resume 123e4567-e89b-12d3-a456-426614174000"
                     .to_string(),
             ]
         );
@@ -866,8 +893,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "codex-features")]
     fn resume_model_flag_applies_when_no_root_flags() {
-        let interactive = finalize_from_args(["codex", "resume", "-m", "gpt-5.1-test"].as_ref());
+        let interactive = finalize_from_args(["nori", "resume", "-m", "gpt-5.1-test"].as_ref());
 
         assert_eq!(interactive.model.as_deref(), Some("gpt-5.1-test"));
         assert!(interactive.resume_picker);
@@ -876,8 +904,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "codex-features")]
     fn resume_picker_logic_none_and_not_last() {
-        let interactive = finalize_from_args(["codex", "resume"].as_ref());
+        let interactive = finalize_from_args(["nori", "resume"].as_ref());
         assert!(interactive.resume_picker);
         assert!(!interactive.resume_last);
         assert_eq!(interactive.resume_session_id, None);
@@ -885,8 +914,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "codex-features")]
     fn resume_picker_logic_last() {
-        let interactive = finalize_from_args(["codex", "resume", "--last"].as_ref());
+        let interactive = finalize_from_args(["nori", "resume", "--last"].as_ref());
         assert!(!interactive.resume_picker);
         assert!(interactive.resume_last);
         assert_eq!(interactive.resume_session_id, None);
@@ -894,8 +924,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "codex-features")]
     fn resume_picker_logic_with_session_id() {
-        let interactive = finalize_from_args(["codex", "resume", "1234"].as_ref());
+        let interactive = finalize_from_args(["nori", "resume", "1234"].as_ref());
         assert!(!interactive.resume_picker);
         assert!(!interactive.resume_last);
         assert_eq!(interactive.resume_session_id.as_deref(), Some("1234"));
@@ -903,17 +934,19 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "codex-features")]
     fn resume_all_flag_sets_show_all() {
-        let interactive = finalize_from_args(["codex", "resume", "--all"].as_ref());
+        let interactive = finalize_from_args(["nori", "resume", "--all"].as_ref());
         assert!(interactive.resume_picker);
         assert!(interactive.resume_show_all);
     }
 
     #[test]
+    #[cfg(feature = "codex-features")]
     fn resume_merges_option_flags_and_full_auto() {
         let interactive = finalize_from_args(
             [
-                "codex",
+                "nori",
                 "resume",
                 "sid",
                 "--oss",
@@ -967,10 +1000,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "codex-features")]
     fn resume_merges_dangerously_bypass_flag() {
         let interactive = finalize_from_args(
             [
-                "codex",
+                "nori",
                 "resume",
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
@@ -983,6 +1017,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "codex-features")]
     fn feature_toggles_known_features_generate_overrides() {
         let toggles = FeatureToggles {
             enable: vec!["web_search_request".to_string()],
@@ -999,6 +1034,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "codex-features")]
     fn feature_toggles_unknown_feature_errors() {
         let toggles = FeatureToggles {
             enable: vec!["does_not_exist".to_string()],
@@ -1008,5 +1044,147 @@ mod tests {
             .to_overrides()
             .expect_err("feature should be rejected");
         assert_eq!(err.to_string(), "Unknown feature flag: does_not_exist");
+    }
+
+    /// When codex-features is disabled, --oss flag should not be recognized
+    #[test]
+    #[cfg(not(feature = "codex-features"))]
+    fn oss_flag_rejected_without_codex_features() {
+        let result = MultitoolCli::try_parse_from(["nori", "--oss"]);
+        assert!(
+            result.is_err(),
+            "--oss should be rejected when codex-features is disabled"
+        );
+    }
+
+    /// When codex-features is disabled, --local-provider flag should not be recognized
+    #[test]
+    #[cfg(not(feature = "codex-features"))]
+    fn local_provider_flag_rejected_without_codex_features() {
+        let result = MultitoolCli::try_parse_from(["nori", "--local-provider", "ollama"]);
+        assert!(
+            result.is_err(),
+            "--local-provider should be rejected when codex-features is disabled"
+        );
+    }
+
+    /// When codex-features is disabled, --sandbox flag should not be recognized
+    #[test]
+    #[cfg(not(feature = "codex-features"))]
+    fn sandbox_flag_rejected_without_codex_features() {
+        let result = MultitoolCli::try_parse_from(["nori", "--sandbox", "read-only"]);
+        assert!(
+            result.is_err(),
+            "--sandbox should be rejected when codex-features is disabled"
+        );
+    }
+
+    /// When codex-features is disabled, --ask-for-approval flag should not be recognized
+    #[test]
+    #[cfg(not(feature = "codex-features"))]
+    fn approval_flag_rejected_without_codex_features() {
+        let result = MultitoolCli::try_parse_from(["nori", "--ask-for-approval", "on-failure"]);
+        assert!(
+            result.is_err(),
+            "--ask-for-approval should be rejected when codex-features is disabled"
+        );
+    }
+
+    /// When codex-features is disabled, --full-auto flag should not be recognized
+    #[test]
+    #[cfg(not(feature = "codex-features"))]
+    fn full_auto_flag_rejected_without_codex_features() {
+        let result = MultitoolCli::try_parse_from(["nori", "--full-auto"]);
+        assert!(
+            result.is_err(),
+            "--full-auto should be rejected when codex-features is disabled"
+        );
+    }
+
+    /// When codex-features is disabled, --dangerously-bypass-approvals-and-sandbox flag should not be recognized
+    #[test]
+    #[cfg(not(feature = "codex-features"))]
+    fn dangerous_bypass_flag_rejected_without_codex_features() {
+        let result =
+            MultitoolCli::try_parse_from(["nori", "--dangerously-bypass-approvals-and-sandbox"]);
+        assert!(
+            result.is_err(),
+            "--dangerously-bypass-approvals-and-sandbox should be rejected when codex-features is disabled"
+        );
+    }
+
+    /// When codex-features is disabled, --search flag should not be recognized
+    #[test]
+    #[cfg(not(feature = "codex-features"))]
+    fn search_flag_rejected_without_codex_features() {
+        let result = MultitoolCli::try_parse_from(["nori", "--search"]);
+        assert!(
+            result.is_err(),
+            "--search should be rejected when codex-features is disabled"
+        );
+    }
+
+    /// When codex-features is disabled, --enable flag should not be recognized
+    #[test]
+    #[cfg(not(feature = "codex-features"))]
+    fn enable_flag_rejected_without_codex_features() {
+        let result = MultitoolCli::try_parse_from(["nori", "--enable", "web_search_request"]);
+        assert!(
+            result.is_err(),
+            "--enable should be rejected when codex-features is disabled"
+        );
+    }
+
+    /// When codex-features is disabled, --disable flag should not be recognized
+    #[test]
+    #[cfg(not(feature = "codex-features"))]
+    fn disable_flag_rejected_without_codex_features() {
+        let result = MultitoolCli::try_parse_from(["nori", "--disable", "unified_exec"]);
+        assert!(
+            result.is_err(),
+            "--disable should be rejected when codex-features is disabled"
+        );
+    }
+
+    /// Binary name should be "nori" in help output
+    #[test]
+    fn binary_name_is_nori() {
+        let help = MultitoolCli::command().render_help().to_string();
+        assert!(
+            help.contains("nori [OPTIONS]"),
+            "Help should show 'nori' as binary name, got: {help}"
+        );
+        assert!(
+            !help.contains("codex [OPTIONS]"),
+            "Help should not show 'codex' as binary name"
+        );
+    }
+
+    /// Config path example should reference ~/.nori/cli/ not ~/.codex/
+    #[test]
+    fn config_help_references_nori_path() {
+        let help = MultitoolCli::command().render_help().to_string();
+        assert!(
+            help.contains("~/.nori/cli/config.toml"),
+            "Help should reference ~/.nori/cli/config.toml, got: {help}"
+        );
+        assert!(
+            !help.contains("~/.codex/config.toml"),
+            "Help should not reference ~/.codex/config.toml"
+        );
+    }
+
+    /// Config example should show agent="claude-code" not model="o3"
+    #[test]
+    fn config_example_shows_agent_claude_code() {
+        let help = MultitoolCli::command().render_long_help().to_string();
+        assert!(
+            help.contains("agent=\"claude-code\""),
+            "Help should show agent=\"claude-code\" example, got: {help}"
+        );
+        assert!(
+            !help.contains("model=\"o3\""),
+            "Help should not show model=\"o3\" example"
+        );
     }
 }
