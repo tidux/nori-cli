@@ -437,7 +437,7 @@ jobs:
     needs: [validate, stage-npm]
     # Only publish for actual tag pushes, not workflow_dispatch (which is dry run only)
     if: ${{ !failure() && !cancelled() && github.event_name == 'push' }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     environment: npm-publish
     permissions:
       contents: read # Required to checkout code
