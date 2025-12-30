@@ -345,6 +345,10 @@ name = "Mock ACP provider for tests"
         // This ensures footer displays git branch/nori version immediately
         cmd.env("NORI_SYNC_SYSTEM_INFO", "1");
 
+        // Mock instruction files for consistent banner width across machines
+        // This returns a constant list (~/.claude/CLAUDE.md) instead of discovering real files
+        cmd.env("NORI_MOCK_INSTRUCTION_FILES", "1");
+
         let _child = pair.slave.spawn_command(cmd)?;
 
         // Set master PTY to non-blocking mode before cloning reader
@@ -825,6 +829,15 @@ pub fn normalize_for_snapshot(contents: String) -> String {
         }
     }
 
+    // Replace nix-shell temp directories: /tmp/nix-shell.XXXX/.tmpXXXXXX -> [TMP_DIR]
+    // This handles the case where nix creates nested tmp directories
+    while let Some(start) = normalized.find("/tmp/nix-shell.") {
+        let end = normalized[start..]
+            .find(|c: char| c.is_whitespace() || c == '│')
+            .map_or(normalized.len(), |pos| start + pos);
+        normalized.replace_range(start..end, "[TMP_DIR]");
+    }
+
     // Per-line replacements
     let lines: Vec<String> = normalized
         .lines()
@@ -837,13 +850,13 @@ pub fn normalize_for_snapshot(contents: String) -> String {
                 return "─".repeat(line.chars().count());
             }
 
-            // Version: "Nori vX.Y.Z-prerelease" -> "Nori v0.0.0"
-            // Only replace if it looks like a version (digit after "Nori v")
+            // Version: "Nori CLI vX.Y.Z-prerelease" -> "Nori CLI v0.0.0"
+            // Only replace if it looks like a version (digit after "Nori CLI v")
             let is_version = line
-                .find("Nori v")
-                .and_then(|pos| line.chars().nth(pos + 6))
+                .find("Nori CLI v")
+                .and_then(|pos| line.chars().nth(pos + 10))
                 .is_some_and(|c| c.is_ascii_digit());
-            if is_version && let Some(result) = replace_after_marker(&line, "Nori ", "v0.0.0") {
+            if is_version && let Some(result) = replace_after_marker(&line, "Nori CLI ", "v0.0.0") {
                 line = result;
             }
 
@@ -853,6 +866,32 @@ pub fn normalize_for_snapshot(contents: String) -> String {
             }
 
             line
+        })
+        .collect();
+    normalized = lines.join("\n");
+
+    // Normalize box line widths to a fixed width (prevents flaky snapshots from varying content)
+    // This handles lines like "│ content │" and "╰───────╯" that vary based on directory path length
+    const FIXED_BOX_WIDTH: usize = 37; // Fixed inner width for consistency
+    let lines: Vec<String> = normalized
+        .lines()
+        .map(|line| {
+            // Normalize box content lines: "│ content    │" -> fixed width
+            if line.starts_with('│') && line.ends_with('│') {
+                let inner = &line[3..line.len() - 3]; // Strip "│ " and " │" (3 bytes each for UTF-8)
+                let trimmed = inner.trim_end();
+                if trimmed.len() < FIXED_BOX_WIDTH {
+                    return format!("│ {:<width$} │", trimmed, width = FIXED_BOX_WIDTH);
+                }
+            }
+            // Normalize bottom border: "╰───────╯" -> fixed width
+            if line.starts_with('╰')
+                && line.ends_with('╯')
+                && line.chars().all(|c| c == '╰' || c == '─' || c == '╯')
+            {
+                return format!("╰{}╯", "─".repeat(FIXED_BOX_WIDTH + 2));
+            }
+            line.to_string()
         })
         .collect();
     normalized = lines.join("\n");
@@ -1080,6 +1119,44 @@ mod tests {
         assert_eq!(
             normalize_for_input_snapshot(input_similar.to_string()),
             input_similar
+        );
+    }
+
+    // @current-session
+    #[test]
+    fn test_normalize_version_and_profile() {
+        // Test that version and profile are normalized correctly
+        let input = r#"╭──────────────────────────────────────────────────────────────╮
+│ Nori CLI v0.1.2                                              │
+│ profile:   testuser                                          │
+╰──────────────────────────────────────────────────────────────╯"#;
+
+        let normalized = normalize_for_snapshot(input.to_string());
+
+        // Profile should be normalized to [PROF]
+        assert!(
+            normalized.contains("[PROF]"),
+            "Profile should be normalized, got:\n{}",
+            normalized
+        );
+
+        // Version should be normalized to v0.0.0 (Nori CLI vX.Y.Z format)
+        assert!(
+            normalized.contains("Nori CLI v0.0.0"),
+            "Version should be normalized to 'Nori CLI v0.0.0', got:\n{}",
+            normalized
+        );
+
+        // Box structure preserved
+        assert!(
+            normalized.contains("╭──"),
+            "Should preserve top border, got:\n{}",
+            normalized
+        );
+        assert!(
+            normalized.contains("╰──"),
+            "Should preserve bottom border, got:\n{}",
+            normalized
         );
     }
 }
