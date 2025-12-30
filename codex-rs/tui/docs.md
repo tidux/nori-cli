@@ -65,7 +65,8 @@ In `spawn_acp_agent()`, the main task must drop its `Arc<AcpBackend>` reference 
 - `shimmer.rs`: Loading animation effects
 - `status_indicator_widget.rs`: Status display
 - `nori/`: Nori-specific branding and customization (see `@/codex-rs/tui/src/nori/docs.md`)
-- `system_info.rs`: Background system info collection for footer (git branch, Nori profile/version, git stats)
+- `system_info.rs`: Background system info collection for footer (git branch, Nori profile/version, git stats, worktree detection)
+- `effective_cwd_tracker.rs`: Tracks effective CWD from tool call locations with debounce logic
 
 **Input Handling:**
 
@@ -282,9 +283,11 @@ The `color.rs` and `terminal_palette.rs` modules handle terminal color detection
 - Black-box integration tests in `@/codex-rs/tui-pty-e2e` test full TUI via PTY
 - Integration tests spawn real `nori` binary with `mock-acp-agent` backend
 
-**System Info Background Refresh:**
+**System Info and Effective CWD Tracking:**
 
-The footer displays system information (git branch, Nori profile, Nori version, git stats) that is collected asynchronously to avoid blocking TUI startup:
+The footer displays system information (git branch, Nori profile, Nori version, git stats) that is collected asynchronously. The system also dynamically updates when the agent works in different directories (e.g., git worktrees).
+
+*Initial Collection:*
 
 1. `BottomPane::new()` initializes the footer with default (empty) `SystemInfo`
 2. `App::run()` spawns a background thread that calls `SystemInfo::collect_fresh()`
@@ -292,18 +295,51 @@ The footer displays system information (git branch, Nori profile, Nori version, 
 4. `App` receives the event and calls `ChatWidget::apply_system_info_refresh()`
 5. The update propagates through `BottomPane::set_system_info()` to the composer
 
+*Dynamic CWD Tracking:*
+
+The ACP protocol sets CWD at session creation and it is immutable. However, when the agent works in different directories (e.g., git worktrees created via `/skill using-git-worktrees`), the footer dynamically updates:
+
+1. `ChatWidget` maintains an `EffectiveCwdTracker` initialized with the session CWD
+2. Directory changes are detected from two event sources:
+   - **Shell commands**: `handle_exec_begin_now()` calls `observe_directory(ev.cwd)`
+   - **File writes**: `on_patch_apply_begin()` and `handle_patch_apply_end_now()` call `observe_directories_from_changes()`, which extracts parent directories from file paths and calls `observe_file_path()` for each
+3. For file paths, relative paths are resolved against `config.cwd` before extracting the parent directory
+4. The tracker uses 500ms debounce to avoid flickering during rapid operations in different directories
+5. When effective CWD changes (debounce threshold met), ChatWidget sends `AppEvent::RefreshSystemInfoForDirectory(dir)`
+6. App spawns a background thread calling `SystemInfo::collect_for_directory(&dir)`
+7. The thread sends `AppEvent::SystemInfoRefreshed(info)` when complete
+8. Footer re-renders with the new directory's git branch and stats
+
 ```
-┌─────────────┐     spawn thread     ┌──────────────────┐
-│  App::run() │ ─────────────────────▶│  collect_fresh() │
-└─────────────┘                       └────────┬─────────┘
-                                               │
-     ┌─────────────────────────────────────────┘
+┌────────────────────┐  observe_directory()       ┌──────────────────────┐
+│ handle_exec_begin  │ ──────────────────────────▶│                      │
+└────────────────────┘                            │                      │
+                                                  │ EffectiveCwdTracker  │
+┌────────────────────┐  observe_file_path()       │                      │
+│ on_patch_apply_*   │ ──────────────────────────▶│                      │
+└────────────────────┘                            └──────────┬───────────┘
+                                                             │ (if changed after 500ms)
+     ┌───────────────────────────────────────────────────────┘
+     │  AppEvent::RefreshSystemInfoForDirectory
+     ▼
+┌─────────────┐     spawn thread     ┌─────────────────────────┐
+│     App     │ ─────────────────────▶│ collect_for_directory() │
+└─────────────┘                       └───────────┬─────────────┘
+                                                  │
+     ┌────────────────────────────────────────────┘
      │  AppEvent::SystemInfoRefreshed
      ▼
 ┌───────────────────┐     set_system_info()    ┌────────────┐
 │ ChatWidget        │ ─────────────────────────▶│ BottomPane │
 └───────────────────┘                          └────────────┘
 ```
+*Git Worktree Detection:*
+
+`SystemInfo` includes an `is_worktree: bool` field that indicates whether the current directory is a git worktree (not the main repository). Detection works by comparing `git rev-parse --git-common-dir` with `--git-dir` - in a worktree, these paths differ.
+
+The footer uses visual differentiation:
+- **Yellow** branch indicator: Main repository
+- **Orange** branch indicator: Git worktree (RGB 255, 165, 0)
 
 For E2E testing, `NORI_SYNC_SYSTEM_INFO=1` env var enables synchronous collection in debug builds. This is set automatically by `@/codex-rs/tui-pty-e2e` to ensure footer data appears immediately in tests.
 

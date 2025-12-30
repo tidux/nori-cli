@@ -90,6 +90,7 @@ use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
 use crate::diff_render::display_path_for;
+use crate::effective_cwd_tracker::EffectiveCwdTracker;
 use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
@@ -334,6 +335,8 @@ pub(crate) struct ChatWidget {
     current_rollout_path: Option<PathBuf>,
     // Tracks incomplete ExecCells that were flushed before completion.
     pending_exec_cells: PendingExecCellTracker,
+    // Tracks the effective CWD based on tool call locations for footer updates.
+    effective_cwd_tracker: EffectiveCwdTracker,
     // Pending agent selection for next prompt submission
     pending_agent: Option<PendingAgentInfo>,
     // Expected model name for agent switch synchronization.
@@ -825,6 +828,9 @@ impl ChatWidget {
     }
 
     fn on_patch_apply_begin(&mut self, event: PatchApplyBeginEvent) {
+        // Observe directories from file paths to potentially update footer git info.
+        self.observe_directories_from_changes(&event.changes);
+
         self.add_to_history(history_cell::new_patch_event(
             event.changes,
             &self.config.cwd,
@@ -1126,10 +1132,52 @@ impl ChatWidget {
         &mut self,
         event: codex_core::protocol::PatchApplyEndEvent,
     ) {
+        // Observe directories from file paths to potentially update footer git info.
+        self.observe_directories_from_changes(&event.changes);
+
         // If the patch was successful, just let the "Edited" block stand.
         // Otherwise, add a failure block.
         if !event.success {
             self.add_to_history(history_cell::new_patch_apply_failure(event.stderr));
+        }
+    }
+
+    /// Observes the parent directories of changed files to update the effective CWD tracker.
+    /// If the effective CWD changes (after debounce), triggers a system info refresh.
+    ///
+    /// Uses the git repository root for the refresh directory rather than the file's parent
+    /// to ensure git commands work correctly. Also skips directories that don't exist yet
+    /// (which can happen when creating new files in new directories).
+    fn observe_directories_from_changes(
+        &mut self,
+        changes: &std::collections::HashMap<PathBuf, codex_core::protocol::FileChange>,
+    ) {
+        for file_path in changes.keys() {
+            // Resolve relative paths against config.cwd before extracting parent
+            let absolute_path = if file_path.is_absolute() {
+                file_path.clone()
+            } else {
+                self.config.cwd.join(file_path)
+            };
+
+            if self.effective_cwd_tracker.observe_file_path(&absolute_path) {
+                // Find the git root for this path, falling back to parent directory
+                // This ensures git commands work correctly even when the immediate
+                // parent directory doesn't exist yet (new file in new directory)
+                let refresh_dir = crate::effective_cwd_tracker::find_git_root(&absolute_path)
+                    .or_else(|| {
+                        // Fall back to parent directory only if it exists
+                        absolute_path
+                            .parent()
+                            .filter(|p| p.exists())
+                            .map(std::path::Path::to_path_buf)
+                    });
+
+                if let Some(dir) = refresh_dir {
+                    self.app_event_tx
+                        .send(AppEvent::RefreshSystemInfoForDirectory(dir));
+                }
+            }
         }
     }
 
@@ -1187,6 +1235,13 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
+        // Observe the command's working directory to potentially update footer git info.
+        // If the effective CWD changes (after debounce), trigger a system info refresh.
+        if self.effective_cwd_tracker.observe_directory(ev.cwd.clone()) {
+            self.app_event_tx
+                .send(AppEvent::RefreshSystemInfoForDirectory(ev.cwd.clone()));
+        }
+
         // Ensure the status indicator is visible while the command runs.
         self.running_commands.insert(
             ev.call_id.clone(),
@@ -1364,6 +1419,7 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             pending_exec_cells: PendingExecCellTracker::new(),
+            effective_cwd_tracker: EffectiveCwdTracker::with_initial_cwd(config.cwd),
             pending_agent: None,
             expected_model,
             session_configured_received: false,
@@ -1450,6 +1506,7 @@ impl ChatWidget {
             feedback,
             current_rollout_path: None,
             pending_exec_cells: PendingExecCellTracker::new(),
+            effective_cwd_tracker: EffectiveCwdTracker::with_initial_cwd(config.cwd),
             pending_agent: None,
             expected_model,
             // For existing conversations, we've already received SessionConfigured

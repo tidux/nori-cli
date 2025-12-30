@@ -577,6 +577,35 @@ mod tests {
     }
 
     #[test]
+    fn nori_header_renders_instruction_files() {
+        let cell = NoriSessionHeaderCell {
+            version: "test",
+            agent: "test-agent".to_string(),
+            directory: PathBuf::from("/tmp/test"),
+            nori_profile: Some("test-profile".to_string()),
+            instruction_files: vec![
+                InstructionFile {
+                    path: PathBuf::from("/home/user/project/AGENTS.md"),
+                    active: true,
+                },
+                InstructionFile {
+                    path: PathBuf::from("/home/user/project/.claude/rules.md"),
+                    active: false,
+                },
+            ],
+        };
+
+        let lines = cell.display_lines(80);
+        let rendered = render_lines(&lines).join("\n");
+
+        // Should show instruction files section
+        assert!(
+            rendered.contains("Instruction Files"),
+            "Should show 'Instruction Files' section header"
+        );
+    }
+
+    #[test]
     fn nori_header_renders_correctly() {
         let cell = NoriSessionHeaderCell::new("test-agent".to_string(), PathBuf::from("/tmp/test"));
 
