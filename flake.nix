@@ -24,5 +24,22 @@
           default = codex-rs;
         }
       );
+
+      devShells = forAllSystems (system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShell {
+            # Pull in dependencies from your package definition
+            inputsFrom = [ (pkgs.callPackage ./codex-rs { }) ];
+
+            # Define the library path so the binary finds Nix's OpenSSL at runtime
+            shellHook = ''
+              export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.openssl ]}:$LD_LIBRARY_PATH
+            '';
+          };
+        }
+      );
     };
 }
