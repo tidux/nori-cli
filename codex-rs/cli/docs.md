@@ -1,4 +1,4 @@
-# Noridoc: cli
+# Noridoc: nori-cli
 
 Path: @/codex-rs/cli
 
@@ -16,9 +16,15 @@ This crate is the primary entry point that ties together the core crates:
 
 ### Core Implementation
 
-**Main Entry:**
+**SeatbeltCommand**: macOS sandbox testing with options:
+- `--full-auto` - Network-disabled sandbox with cwd/TMPDIR write access
+- `--log-denials` - Capture and print sandbox denials via `log stream`
 
-`main.rs` parses CLI using `clap` and routes based on subcommand:
+**LandlockCommand**: Linux sandbox testing with:
+- `--full-auto` - Network-disabled sandbox with cwd/TMPDIR write access
+
+**WindowsCommand**: Windows sandbox testing with:
+- `--full-auto` - Restricted token sandbox with cwd/TMPDIR write access
 
 ```rust
 match subcommand {
@@ -29,19 +35,9 @@ match subcommand {
 }
 ```
 
-**Subcommands:**
+**Debug Sandbox** (`debug_sandbox.rs`): Implementation of the sandbox testing commands.
 
-| Subcommand | Alias | Description | Required Feature |
-|------------|-------|-------------|------------------|
-| `login` | | Manage authentication | `login` |
-| `logout` | | Remove stored credentials | `login` |
-| `sandbox` | `debug` | Test sandbox enforcement | (always) |
-| `execpolicy` | | Execpolicy tooling (hidden) | (always) |
-| `stdio-to-uds` | | Internal stdio relay (hidden) | (always) |
-
-**Always-Available Safety Override:**
-
-The `--dangerously-bypass-approvals-and-sandbox` flag (alias: `--yolo`) is available in all builds. When set, it configures `approval_policy: AskForApproval::Never`, causing the ACP backend to auto-approve all tool operations without prompting the user.
+**Login** (`login.rs`, feature-gated by `login`): Authentication-related CLI functionality.
 
 ### Things to Know
 
@@ -77,7 +73,7 @@ The `debug_sandbox` module (in `debug_sandbox/`) provides:
 - `nori sandbox linux` (Landlock)
 - `nori sandbox windows` (Restricted token)
 
-These allow testing sandbox behavior without running the full TUI.
+These allow testing sandbox behavior without running the full TUI. All commands accept trailing arguments as the command to sandbox, and `--full-auto` provides sensible defaults. On macOS, `--log-denials` requires elevated permissions for log streaming.
 
 **Login Flow:**
 
