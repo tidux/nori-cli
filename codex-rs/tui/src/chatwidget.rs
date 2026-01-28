@@ -586,9 +586,10 @@ impl ChatWidget {
         // Refresh system info (including git branch) on task completion.
         // This catches any branch changes that occurred during the agent's turn.
         self.app_event_tx
-            .send(AppEvent::RefreshSystemInfoForDirectory(
-                self.config.cwd.clone(),
-            ));
+            .send(AppEvent::RefreshSystemInfoForDirectory {
+                dir: self.config.cwd.clone(),
+                model: Some(self.config.model.clone()),
+            });
 
         // If there is a queued user message, send exactly one now to begin the next turn.
         self.maybe_send_next_queued_input();
@@ -611,17 +612,19 @@ impl ChatWidget {
     }
 
     fn apply_token_info(&mut self, info: TokenUsageInfo) {
-        let percent = self.context_remaining_percent(&info);
+        let percent = self.context_used_percent(&info);
         self.bottom_pane.set_context_window_percent(percent);
         self.token_info = Some(info);
     }
 
-    fn context_remaining_percent(&self, info: &TokenUsageInfo) -> Option<i64> {
+    fn context_used_percent(&self, info: &TokenUsageInfo) -> Option<i64> {
         info.model_context_window
             .or(self.config.model_context_window)
             .map(|window| {
-                info.last_token_usage
-                    .percent_of_context_window_remaining(window)
+                let remaining = info
+                    .last_token_usage
+                    .percent_of_context_window_remaining(window);
+                (100 - remaining).clamp(0, 100)
             })
     }
 
@@ -1219,7 +1222,10 @@ impl ChatWidget {
 
                 if let Some(dir) = refresh_dir {
                     self.app_event_tx
-                        .send(AppEvent::RefreshSystemInfoForDirectory(dir));
+                        .send(AppEvent::RefreshSystemInfoForDirectory {
+                            dir,
+                            model: Some(self.config.model.clone()),
+                        });
                 }
             }
         }
@@ -1295,7 +1301,10 @@ impl ChatWidget {
         // If the effective CWD changes (after debounce), trigger a system info refresh.
         if self.effective_cwd_tracker.observe_directory(ev.cwd.clone()) {
             self.app_event_tx
-                .send(AppEvent::RefreshSystemInfoForDirectory(ev.cwd.clone()));
+                .send(AppEvent::RefreshSystemInfoForDirectory {
+                    dir: ev.cwd.clone(),
+                    model: Some(self.config.model.clone()),
+                });
         }
 
         // Ensure the status indicator is visible while the command runs.
@@ -1990,9 +1999,10 @@ impl ChatWidget {
         // This catches branch changes that happened between interactions
         // (e.g., user switched branches in another terminal).
         self.app_event_tx
-            .send(AppEvent::RefreshSystemInfoForDirectory(
-                self.config.cwd.clone(),
-            ));
+            .send(AppEvent::RefreshSystemInfoForDirectory {
+                dir: self.config.cwd.clone(),
+                model: Some(self.config.model.clone()),
+            });
 
         // Check if there's a pending agent switch - if so, send the message through
         // the App to trigger the switch first
@@ -3868,6 +3878,11 @@ impl ChatWidget {
 
     pub(crate) fn composer_text(&self) -> String {
         self.bottom_pane.composer_text()
+    }
+
+    /// Returns the first prompt text for this session, used for transcript matching.
+    pub(crate) fn first_prompt_text(&self) -> Option<String> {
+        self.first_prompt_text.clone()
     }
 
     /// Returns true if a popup or custom view is currently active in the bottom pane.

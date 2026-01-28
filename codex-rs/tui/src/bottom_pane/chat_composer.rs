@@ -1416,13 +1416,35 @@ impl ChatComposer {
             (None, None, None, None, None, None)
         };
 
+        // Extract token breakdown and agent kind from transcript location
+        let transcript_location = self
+            .system_info
+            .as_ref()
+            .and_then(|s| s.transcript_location.as_ref());
+        let token_breakdown = transcript_location.and_then(|loc| loc.token_breakdown.as_ref());
+        let context_window_size =
+            transcript_location.map(|loc| loc.agent_kind.context_window_size());
+        let context_tokens = token_breakdown.map(codex_acp::TranscriptTokenUsage::total);
+        let context_window_percent = self.context_window_percent.or_else(|| {
+            context_window_size.and_then(|window_size| {
+                context_tokens.map(|tokens| {
+                    if window_size > 0 {
+                        ((tokens as f64 / window_size as f64) * 100.0).round() as i64
+                    } else {
+                        0
+                    }
+                })
+            })
+        });
+
         FooterProps {
             mode: self.footer_mode(),
             esc_backtrack_hint: self.esc_backtrack_hint,
             use_shift_enter_hint: self.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             vertical_footer: self.vertical_footer,
-            _context_window_percent: self.context_window_percent,
+            context_window_percent,
+            context_tokens,
             git_branch,
             approval_mode_label: self.approval_mode_label.clone(),
             nori_profile,
@@ -1435,6 +1457,9 @@ impl ChatComposer {
                 .as_ref()
                 .map(|s| s.is_worktree)
                 .unwrap_or(false),
+            input_tokens: token_breakdown.map(|t| t.input_tokens),
+            output_tokens: token_breakdown.map(|t| t.output_tokens),
+            cached_tokens: token_breakdown.map(|t| t.cached_tokens),
         }
     }
 

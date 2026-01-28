@@ -29,11 +29,13 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 toml = { workspace = true }
 dirs = { workspace = true }
 diffy = { workspace = true }
+sha2 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]
+filetime = "0.2"
 pretty_assertions = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }

@@ -27,6 +27,7 @@ Key files:
 - `connection.rs` - Subprocess spawning and JSON-RPC communication
 - `translator.rs` - Protocol translation between ACP and Codex types
 - `backend.rs` - Implements `ConversationClient` trait from codex-core
+- `transcript_discovery.rs` - Discovers transcript files for external agents
 
 ### Core Implementation
 
@@ -101,6 +102,101 @@ The binding string format is kept terminal-agnostic (no crossterm dependency in 
 - Uses advisory file locking for concurrent write safety
 - `HistoryPersistence` policy: `SaveAll` (default) or `None` (privacy mode)
 
+**Transcript Discovery** (`transcript_discovery.rs`):
+
+Detects the current running transcript file when Nori runs within an external agent environment. Used by the TUI's `SystemInfo` module (see `@/codex-rs/tui/src/system_info.rs`) to display token usage in the footer.
+
+Two discovery entry points are provided:
+- `discover_transcript_for_agent()` - Basic discovery using directory/CWD matching (legacy)
+- `discover_transcript_for_agent_with_message()` - Preferred entry point that uses first-message matching for Claude Code
+
+Agent detection via environment variables:
+
+| Env Var | Agent |
+|---------|-------|
+| `CLAUDECODE=1` | Claude Code |
+| `CODEX_CLI=1` | Codex |
+| `GEMINI_CLI=1` | Gemini |
+
+Transcript file locations and matching strategy:
+
+| Agent | Path Pattern | Matching Strategy |
+|-------|--------------|-------------------|
+| Claude Code | `~/.claude/projects/<transformed-path>/<uuid>.jsonl` | First-message matching (requires `first_message` parameter) |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | Parse first JSON line for `payload.cwd` field, match against CWD |
+| Gemini | `~/.gemini/tmp/<sha256-hash>/chats/<session>.json` | Hash is SHA256 of canonical working directory path |
+
+**Claude Code First-Message Matching:**
+
+Claude Code transcript discovery uses the first user message to accurately identify the correct transcript file. This is necessary because multiple sessions may exist in the same project directory, and picking the most-recently-modified file could return the wrong transcript.
+
+The matching process:
+1. Normalize both the search message and file messages by stripping whitespace and truncating to 20 characters
+2. Only consider files modified in the last 2 days (`MAX_TRANSCRIPT_AGE_SECS = 172800`)
+3. Read up to 10 lines (`MAX_LINES_TO_SEARCH`) or until the first user text entry is found
+4. Skip `tool_result` entries (which also have `"type":"user"`)
+5. If multiple files match, pick the most recently modified one
+6. If no first_message is provided or no match is found, return an error (fail closed rather than return wrong transcript)
+
+The `first_message` flows from the TUI's `ChatWidget::first_prompt_text()` through the system info refresh mechanism to the discovery layer.
+
+**Token Usage Parsing** (`transcript_discovery.rs`):
+
+The `parse_transcript_tokens()` function extracts token usage breakdown from transcript files. Returns a `TranscriptTokenUsage` struct:
+
+```rust
+pub struct TranscriptTokenUsage {
+    pub input_tokens: i64,    // Total input tokens
+    pub output_tokens: i64,   // Total output tokens
+    pub cached_tokens: i64,   // Cached input tokens (subset of input_tokens)
+}
+```
+
+Each agent format requires different parsing:
+
+| Agent | Format | Token Fields |
+|-------|--------|--------------|
+| Claude Code | JSONL | `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens` in `message.usage` |
+| Codex | JSONL | `input_tokens`, `output_tokens`, `cached_input_tokens` from last `token_count` event |
+| Gemini | JSON | `input`, `output`, `thoughts`, `cached` from each message's `tokens` object |
+
+**Claude Code Streaming Deduplication:**
+
+Claude Code logs multiple JSONL entries per API request due to streaming (each streaming delta contains the same usage data). The parser deduplicates by tracking seen `requestId` values in a `HashSet<String>`. Entries without a `requestId` are still counted for backward compatibility with older transcript formats.
+
+**Claude Token Field Semantics:**
+
+| Field | Meaning | Counted As |
+|-------|---------|------------|
+| `input_tokens` | Non-cached input tokens sent | Added to `input_tokens` |
+| `cache_creation_input_tokens` | Tokens sent and cached for future use | Added to `input_tokens` |
+| `cache_read_input_tokens` | Tokens read from cache (discounted) | Reported as `cached_tokens` |
+| `output_tokens` | Output tokens generated | Added to `output_tokens` |
+
+The `TranscriptLocation` struct returned by discovery functions includes:
+- `token_breakdown: Option<TranscriptTokenUsage>` - Detailed breakdown for input, output, and cached tokens
+
+Token parsing is synchronous because `SystemInfo::collect_fresh` runs in a background thread.
+
+The data flow is:
+```
+SystemInfo::collect_for_directory_with_message() (background thread)
+    |
+    v
+discover_transcript_for_agent_with_message(cwd, agent_kind, first_message)
+    |
+    v
+parse_transcript_tokens(path, agent_kind)
+    |
+    v
+TranscriptLocation { ..., token_breakdown }
+    |
+    v
+FooterProps { input_tokens, output_tokens, cached_tokens, context_tokens }
+    |
+    v
+Footer renders "Tokens: 45K in / 78K out (32K cached)"
+```
 **Connection Management** (`connection.rs`):
 
 Thread-safe wrapper pattern for `!Send` ACP futures:
@@ -211,6 +307,8 @@ Unlike core's direct history manipulation, ACP uses a **prompt-based approach**:
 - Approval requests are translated to use appropriate UI (exec approval for shell commands, patch approval for file edits)
 - A `DRAIN_YIELD_COUNT` of 10 yields allows pending notifications to drain before session cleanup
 - Config loading uses Nori-specific paths (`~/.nori/cli/config.toml`) when the `nori-config` feature is enabled in the TUI
+- Transcript discovery is synchronous and intended for use in background threads (e.g., the TUI's `SystemInfo` collection thread)
+- Claude Code transcript discovery requires the first user message to function correctly; without it, the discovery returns an error
 
 **Event Flow Tracing:**
 

@@ -52,6 +52,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use tokio::select;
@@ -237,6 +238,14 @@ pub(crate) struct App {
 
     /// Configurable hotkey bindings loaded from NoriConfig.
     pub(crate) hotkey_config: codex_acp::config::HotkeyConfig,
+    system_info_tx: mpsc::Sender<SystemInfoRefreshRequest>,
+}
+
+#[derive(Clone, Debug)]
+struct SystemInfoRefreshRequest {
+    dir: PathBuf,
+    model: Option<String>,
+    first_message: Option<String>,
 }
 
 impl App {
@@ -343,6 +352,15 @@ impl App {
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
+        let (system_info_tx, system_info_rx) = mpsc::channel();
+        let _system_info_worker = Self::spawn_system_info_worker(
+            system_info_rx,
+            app_event_tx.clone(),
+            config.cwd.clone(),
+            config.model.clone(),
+            initial_prompt.clone(),
+        );
+
         let mut app = Self {
             server: conversation_manager,
             app_event_tx,
@@ -366,6 +384,7 @@ impl App {
             hotkey_config: codex_acp::config::NoriConfig::load()
                 .unwrap_or_default()
                 .hotkeys,
+            system_info_tx,
         };
 
         // Propagate initial hotkey config to the textarea so editing bindings
@@ -411,16 +430,11 @@ impl App {
         let tui_events = tui.event_stream();
         tokio::pin!(tui_events);
 
-        // Spawn background thread to collect system info without blocking startup.
-        // The footer initially shows default (empty) values, and this updates it
-        // once collection completes.
-        {
-            let tx = app.app_event_tx.clone();
-            thread::spawn(move || {
-                let info = crate::system_info::SystemInfo::collect_fresh();
-                tx.send(AppEvent::SystemInfoRefreshed(info));
-            });
-        }
+        app.request_system_info_refresh(
+            app.config.cwd.clone(),
+            Some(app.config.model.clone()),
+            app.chat_widget.first_prompt_text(),
+        );
 
         tui.frame_requester().schedule_frame();
 
@@ -650,14 +664,8 @@ impl App {
             AppEvent::SystemInfoRefreshed(info) => {
                 self.chat_widget.apply_system_info_refresh(info);
             }
-            AppEvent::RefreshSystemInfoForDirectory(dir) => {
-                // Spawn a background thread to collect system info for the specified directory.
-                // This is triggered when the effective CWD changes during agent operations.
-                let tx = self.app_event_tx.clone();
-                thread::spawn(move || {
-                    let info = crate::system_info::SystemInfo::collect_for_directory(&dir);
-                    tx.send(AppEvent::SystemInfoRefreshed(info));
-                });
+            AppEvent::RefreshSystemInfoForDirectory { dir, model } => {
+                self.request_system_info_refresh(dir, model, self.chat_widget.first_prompt_text());
             }
             AppEvent::RateLimitSnapshotFetched(snapshot) => {
                 self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
@@ -1170,6 +1178,56 @@ impl App {
         self.chat_widget.token_usage()
     }
 
+    fn request_system_info_refresh(
+        &self,
+        dir: PathBuf,
+        model: Option<String>,
+        first_message: Option<String>,
+    ) {
+        let request = SystemInfoRefreshRequest {
+            dir,
+            model,
+            first_message,
+        };
+        if self.system_info_tx.send(request).is_err() {
+            tracing::error!("system info refresh channel is closed");
+        }
+    }
+
+    fn spawn_system_info_worker(
+        system_info_rx: mpsc::Receiver<SystemInfoRefreshRequest>,
+        app_event_tx: AppEventSender,
+        initial_dir: PathBuf,
+        initial_model: String,
+        initial_first_message: Option<String>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let mut last_request = SystemInfoRefreshRequest {
+                dir: initial_dir,
+                model: Some(initial_model),
+                first_message: initial_first_message,
+            };
+            loop {
+                match system_info_rx.recv_timeout(Duration::from_secs(5)) {
+                    Ok(request) => last_request = request,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+
+                let agent_kind = last_request
+                    .model
+                    .as_ref()
+                    .and_then(|model| codex_acp::AgentKind::from_slug(model));
+                let info = crate::system_info::SystemInfo::collect_for_directory_with_message(
+                    &last_request.dir,
+                    agent_kind,
+                    last_request.first_message.as_deref(),
+                );
+                app_event_tx.send(AppEvent::SystemInfoRefreshed(info));
+            }
+        })
+    }
+
     fn on_update_reasoning_effort(&mut self, effort: Option<ReasoningEffortConfig>) {
         self.chat_widget.set_reasoning_effort(effort);
         self.config.model_reasoning_effort = effort;
@@ -1498,6 +1556,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
 
     fn make_test_app() -> App {
         let (chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender();
@@ -1509,6 +1568,7 @@ mod tests {
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
 
+        let (system_info_tx, _system_info_rx) = mpsc::channel();
         App {
             server,
             app_event_tx,
@@ -1530,6 +1590,7 @@ mod tests {
             skip_world_writable_scan_once: false,
             pending_agent: None,
             hotkey_config: codex_acp::config::HotkeyConfig::default(),
+            system_info_tx,
         }
     }
 
@@ -1547,6 +1608,7 @@ mod tests {
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
 
+        let (system_info_tx, _system_info_rx) = mpsc::channel();
         (
             App {
                 server,
@@ -1569,6 +1631,7 @@ mod tests {
                 skip_world_writable_scan_once: false,
                 pending_agent: None,
                 hotkey_config: codex_acp::config::HotkeyConfig::default(),
+                system_info_tx,
             },
             rx,
             op_rx,
