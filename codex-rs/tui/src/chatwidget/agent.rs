@@ -188,6 +188,7 @@ fn spawn_acp_agent(config: Config, app_event_tx: AppEventSender) -> SpawnAgentRe
             notify_after_idle: nori_config.notify_after_idle,
             nori_home,
             history_persistence: HistoryPersistence::SaveAll,
+            cli_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
         let backend = match AcpBackend::spawn(&acp_config, event_tx).await {

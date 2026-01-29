@@ -861,6 +861,7 @@ dependencies = [
  "agent-client-protocol",
  "anyhow",
  "async-trait",
+ "chrono",
  "codex-core",
  "codex-protocol",
  "diffy",
@@ -882,6 +883,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
  "which",
 ]
 

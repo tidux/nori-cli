@@ -199,7 +199,158 @@ Footer renders "Tokens: 45K in / 78K out (32K cached)"
 ```
 **Connection Management** (`connection.rs`):
 
-Thread-safe wrapper pattern for `!Send` ACP futures:
+### Transcript Persistence
+
+The ACP module provides client-side transcript persistence that captures a full view of conversations (user input + assistant responses) without relying on agent-side storage. This enables viewing previous sessions without replaying agent mechanics.
+
+**Storage Structure:**
+
+Transcripts are stored at `{nori_home}/transcripts/by-project/{project-id}/sessions/{session-id}.jsonl`:
+
+```
+~/.nori/cli/
+└── transcripts/
+    └── by-project/
+        └── {project-id}/           # 16-hex-char hash
+            ├── project.json        # Project metadata
+            └── sessions/
+                └── {session-id}.jsonl  # JSONL transcript file
+```
+
+**Project Identification:**
+
+Project IDs are derived from the workspace to group sessions by project:
+- Git repositories: SHA-256 hash of normalized git remote URL (SSH and HTTPS normalize to same hash)
+- Non-git directories: SHA-256 hash of canonicalized path
+- Hash is truncated to 16 hex characters for compact directory names
+
+Key exports from `@/codex-rs/acp/src/transcript/project.rs`:
+- `compute_project_id()`: Computes project ID for a working directory
+- `ProjectId`: Contains id, name, git_remote, git_root, and cwd
+
+**Transcript Schema (JSONL):**
+
+Each line in the transcript file is a JSON object with:
+- `ts`: ISO 8601 timestamp
+- `v`: Schema version (currently 1)
+- `type`: Entry type discriminator
+
+Entry types (from `@/codex-rs/acp/src/transcript/types.rs`):
+
+| Type | Description | Key Fields (JSON) |
+|------|-------------|-------------------|
+| `session_meta` | First line, session metadata | session_id, project_id, started_at, cwd, agent, cli_version, git |
+| `user` | User message | id, content, attachments |
+| `assistant` | Complete assistant turn | id, content (blocks), agent |
+| `tool_call` | Tool execution start | call_id, name, input |
+| `tool_result` | Tool execution result | call_id, output, truncated, exit_code |
+| `patch_apply` | File modification result | call_id, operation (edit/write/delete), path, success, error |
+
+**Schema Field Naming:**
+
+The `SessionMetaEntry.agent` and `AssistantEntry.agent` fields identify which ACP agent (e.g., "claude-code", "codex", "gemini") processed the session or message. The field is named `agent` rather than `model` to emphasize that it identifies the agent software, not a specific model variant.
+**TranscriptRecorder:**
+
+The `TranscriptRecorder` (in `@/codex-rs/acp/src/transcript/recorder.rs`) handles async, non-blocking writes:
+
+```
+┌─────────────────────────┐   mpsc channel   ┌─────────────────────────┐
+│   AcpBackend            │─────────────────►│   Writer Task           │
+│                         │  TranscriptCmd   │   (background)          │
+│   record_user_message() │                  │                         │
+│   record_assistant_msg()│                  │   - Writes to JSONL     │
+│   flush() / shutdown()  │                  │   - Creates directories │
+└─────────────────────────┘                  └─────────────────────────┘
+```
+
+Key methods:
+- `new()`: Creates recorder, writes session_meta and project.json
+- `record_user_message()`: Records user input with optional attachments
+- `record_assistant_message()`: Records complete assistant turn with content blocks
+- `record_tool_call()` / `record_tool_result()`: Records tool execution
+- `record_patch_apply()`: Records file modification operations (edit/write/delete)
+- `flush()`: Ensures pending writes are persisted
+- `shutdown()`: Flushes and terminates writer task
+
+**TranscriptLoader:**
+
+The `TranscriptLoader` (in `@/codex-rs/acp/src/transcript/loader.rs`) reads transcripts for viewing:
+
+Key methods:
+- `list_projects()`: List all projects with transcripts
+- `list_sessions()`: List sessions for a specific project
+- `find_sessions_for_cwd()`: Find sessions for current working directory
+- `load_transcript()`: Load complete transcript with all entries
+- `load_session_meta()`: Load just session metadata (for quick listing)
+
+**ACP Integration:**
+
+The `AcpBackend` automatically:
+1. Creates a `TranscriptRecorder` on spawn (with graceful fallback if creation fails)
+2. Records user messages when `Op::UserInput` is processed
+3. Accumulates assistant text during the turn and records when turn completes
+4. Records tool events via `record_tool_events_to_transcript()` in the update handler
+5. Shuts down recorder on `Op::Shutdown`
+
+**Tool Event Recording Flow:**
+
+Tool calls and patch operations are recorded by `record_tool_events_to_transcript()` in `backend.rs`:
+
+```
+ACP SessionUpdate          Transcript Entry
+─────────────────────      ──────────────────
+ToolCall (non-patch)   →   tool_call entry
+ToolCallUpdate         →   tool_result entry (on completion)
+  (Completed, non-patch)
+ToolCallUpdate         →   patch_apply entry (on completion)
+  (Completed, patch)
+```
+
+Patch operations (Edit/Write/Delete via `ToolKind`) are recorded separately from generic tool calls because they represent file modifications. The operation type is determined by `ToolKind`:
+- `ToolKind::Edit` → `PatchOperationType::Edit`
+- `ToolKind::Delete` → `PatchOperationType::Delete`
+- Other (including Write) → `PatchOperationType::Write`
+
+Configuration:
+- `AcpBackendConfig.cli_version`: CLI version included in session metadata
+
+**Re-exported Types:**
+
+Public exports from `@/codex-rs/acp/src/transcript/mod.rs`:
+- `TranscriptRecorder`, `TranscriptLoader`
+- `ProjectId`, `ProjectInfo`, `SessionInfo`, `Transcript`
+- Entry types: `SessionMetaEntry`, `UserEntry`, `AssistantEntry`, `ToolCallEntry`, `ToolResultEntry`, `PatchApplyEntry`
+- `PatchOperationType`: Enum for patch operations (Edit, Write, Delete)
+- `ContentBlock` (Text and Thinking variants), `Attachment`, `GitInfo`
+- `now_iso8601()`: Utility function returning current time as ISO 8601 string
+
+### Stderr Capture Implementation
+
+- Buffer lines per session for access between reader task and caller
+- Bounded at 500 lines with FIFO eviction when full
+- Individual lines truncated to 10KB
+- Reader task runs until EOF or error, logging warnings via tracing
+
+### File-Based Tracing
+
+The `init_rolling_file_tracing()` function in `@/codex-rs/acp/src/tracing_setup.rs` provides structured file logging:
+- Sets global tracing subscriber that writes to rolling daily log files
+- Log files are named `nori-acp.YYYY-MM-DD` in the configured log directory
+- Filters at DEBUG level (debug builds) or WARN with INFO for codex_tui/acp (release builds)
+- RUST_LOG environment variable overrides default log level
+- Uses non-blocking file appender for async-safe writes
+- Creates log directory automatically if it doesn't exist
+- Returns error on re-initialization since global subscriber can only be set once per process
+- Guard is intentionally leaked via `std::mem::forget()` to keep non-blocking writer alive for program lifetime
+- ANSI colors disabled for clean file output
+- Automatically initialized by the CLI (`@/codex-rs/cli/src/main.rs`) at startup, writing to `$NORI_HOME/log/nori-acp.YYYY-MM-DD`
+
+### Core Implementation
+
+**Thread-Safe Connection Wrapper (`connection.rs`):**
+
+The ACP library uses `LocalBoxFuture` which is `!Send`.
+The solution is a thread-safe wrapper pattern:
 
 ```
 ┌─────────────────────────┐   mpsc channels     ┌─────────────────────────┐

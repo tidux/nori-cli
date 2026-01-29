@@ -38,6 +38,8 @@ use crate::connection::AcpModelState;
 use crate::connection::ApprovalEventType;
 use crate::connection::ApprovalRequest;
 use crate::registry::get_agent_config;
+use crate::transcript::ContentBlock;
+use crate::transcript::TranscriptRecorder;
 use crate::translator;
 use crate::translator::is_patch_operation;
 use crate::translator::tool_call_to_file_change;
@@ -158,6 +160,8 @@ pub struct AcpBackendConfig {
     pub nori_home: PathBuf,
     /// History persistence policy
     pub history_persistence: crate::config::HistoryPersistence,
+    /// CLI version for transcript metadata
+    pub cli_version: String,
 }
 
 /// Backend adapter that provides a TUI-compatible interface for ACP agents.
@@ -188,6 +192,8 @@ pub struct AcpBackend {
     approval_policy_tx: watch::Sender<AskForApproval>,
     /// Stored summary from last /compact operation, to be prepended to next prompt
     pending_compact_summary: Arc<Mutex<Option<String>>>,
+    /// Transcript recorder for session persistence
+    transcript_recorder: Option<Arc<TranscriptRecorder>>,
     /// How long after idle before sending a notification
     notify_after_idle: crate::config::NotifyAfterIdle,
 }
@@ -289,6 +295,22 @@ impl AcpBackend {
         let (history_log_id, history_entry_count) =
             crate::message_history::history_metadata(&config.nori_home).await;
 
+        // Initialize transcript recorder (non-fatal if it fails)
+        let transcript_recorder = match TranscriptRecorder::new(
+            &config.nori_home,
+            &cwd,
+            Some(config.model.clone()),
+            &config.cli_version,
+        )
+        .await
+        {
+            Ok(recorder) => Some(Arc::new(recorder)),
+            Err(e) => {
+                warn!("Failed to initialize transcript recorder: {e}");
+                None
+            }
+        };
+
         let backend = Self {
             connection,
             session_id: Arc::new(RwLock::new(session_id)),
@@ -302,6 +324,7 @@ impl AcpBackend {
             conversation_id,
             approval_policy_tx,
             pending_compact_summary: Arc::new(Mutex::new(None)),
+            transcript_recorder,
             notify_after_idle: config.notify_after_idle,
         };
 
@@ -392,6 +415,14 @@ impl AcpBackend {
                 // to allow the TUI to exit properly
                 debug!("Processing Op::Shutdown in ACP mode");
                 let _ = self.connection.cancel(&*self.session_id.read().await).await;
+
+                // Shutdown transcript recorder
+                if let Some(ref recorder) = self.transcript_recorder
+                    && let Err(e) = recorder.shutdown().await
+                {
+                    warn!("Failed to shutdown transcript recorder: {e}");
+                }
+
                 let _ = self
                     .event_tx
                     .send(Event {
@@ -524,6 +555,13 @@ impl AcpBackend {
             return Ok(());
         }
 
+        // Record user message to transcript
+        if let Some(ref recorder) = self.transcript_recorder
+            && let Err(e) = recorder.record_user_message(id, &prompt_text, vec![]).await
+        {
+            warn!("Failed to record user message to transcript: {e}");
+        }
+
         // Check if we have a pending compact summary to prepend
         let pending_summary = self.pending_compact_summary.lock().await.take();
         let final_prompt_text = if let Some(summary) = pending_summary {
@@ -545,6 +583,7 @@ impl AcpBackend {
         let id_clone = id.to_string();
         let user_notifier = Arc::clone(&self.user_notifier);
         let idle_timer_abort = Arc::clone(&self.idle_timer_abort);
+        let transcript_recorder = self.transcript_recorder.clone();
         let notify_after_idle = self.notify_after_idle;
 
         // Spawn task to handle the prompt and translate events
@@ -566,15 +605,21 @@ impl AcpBackend {
                 })
                 .await;
 
-            // Spawn update consumer task
+            // Spawn update consumer task that returns accumulated text for transcript
             let event_tx_clone = event_tx.clone();
             let id_for_updates = id_clone.clone();
+            let transcript_recorder_for_updates = transcript_recorder.clone();
             let update_handler = tokio::spawn(async move {
                 let mut event_sequence: u64 = 0;
+                // Accumulate assistant text for transcript recording
+                let mut accumulated_text = String::new();
                 // Track call_ids that have already had ExecCommandBegin emitted.
                 // The ACP protocol can emit multiple ToolCall events for the same call_id
                 // as details become available, but the TUI expects exactly one Begin per call_id.
                 let mut emitted_begin_call_ids: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                // Track call_ids that have already been recorded to the transcript.
+                let mut recorded_tool_call_ids: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
                 // Track pending patch operations: store FileChange data from ToolCall events
                 // so we can emit PatchApplyBegin on ToolCallUpdate (after approval).
@@ -583,6 +628,16 @@ impl AcpBackend {
                     std::collections::HashMap<PathBuf, codex_protocol::protocol::FileChange>,
                 > = std::collections::HashMap::new();
                 while let Some(update) = update_rx.recv().await {
+                    // Record tool calls and results to transcript
+                    if let Some(ref recorder) = transcript_recorder_for_updates {
+                        record_tool_events_to_transcript(
+                            &update,
+                            recorder,
+                            &mut recorded_tool_call_ids,
+                        )
+                        .await;
+                    }
+
                     let events =
                         translate_session_update_to_events(&update, &mut pending_patch_changes);
                     for event_msg in events {
@@ -597,6 +652,10 @@ impl AcpBackend {
                                 continue;
                             }
                             emitted_begin_call_ids.insert(begin_ev.call_id.clone());
+                        }
+                        // Accumulate text for transcript
+                        if let EventMsg::AgentMessageDelta(ref delta) = event_msg {
+                            accumulated_text.push_str(&delta.delta);
                         }
                         event_sequence += 1;
                         debug!(
@@ -618,14 +677,30 @@ impl AcpBackend {
                     total_events = event_sequence,
                     "ACP dispatch: update stream completed"
                 );
+                accumulated_text
             });
 
             // Send the prompt (clone session_id before moving it since we need it for idle timer)
             let session_id_for_timer = session_id.to_string();
             let result = connection.prompt(session_id, prompt, update_tx).await;
 
-            // Wait for all updates to be processed
-            let _ = update_handler.await;
+            // Wait for all updates to be processed and get accumulated text
+            let accumulated_text = update_handler.await.unwrap_or_default();
+
+            // Record assistant message to transcript if there's accumulated text
+            if !accumulated_text.is_empty()
+                && let Some(ref recorder) = transcript_recorder
+            {
+                let content = vec![ContentBlock::Text {
+                    text: accumulated_text,
+                }];
+                if let Err(e) = recorder
+                    .record_assistant_message(&id_clone, content, None)
+                    .await
+                {
+                    warn!("Failed to record assistant message to transcript: {e}");
+                }
+            }
 
             // If prompt failed, send an error event to the TUI BEFORE TaskComplete
             // This ensures the user sees why their request failed instead of a silent failure
@@ -1278,6 +1353,129 @@ fn translate_session_update_to_events(
             );
             vec![]
         }
+    }
+}
+
+/// Record tool call and result events to the transcript.
+///
+/// This handles recording both regular tool calls (as ToolCall/ToolResult entries)
+/// and patch operations (as PatchApply entries). Patch operations (Edit/Write/Delete)
+/// are recorded separately because they represent file modifications rather than
+/// generic tool invocations.
+async fn record_tool_events_to_transcript(
+    update: &acp::SessionUpdate,
+    recorder: &TranscriptRecorder,
+    recorded_call_ids: &mut std::collections::HashSet<String>,
+) {
+    match update {
+        acp::SessionUpdate::ToolCall(tool_call) => {
+            let call_id = tool_call.tool_call_id.to_string();
+
+            // Skip if we've already recorded this call_id (ACP may send multiple
+            // ToolCall events for the same call_id as details become available)
+            if recorded_call_ids.contains(&call_id) {
+                return;
+            }
+
+            // Skip patch operations here - they're recorded on ToolCallUpdate completion
+            if is_patch_operation(
+                Some(&tool_call.kind),
+                &tool_call.title,
+                tool_call.raw_input.as_ref(),
+            ) {
+                return;
+            }
+
+            // Record non-patch tool calls
+            let input = tool_call.raw_input.clone().unwrap_or(serde_json::json!({}));
+            if let Err(e) = recorder
+                .record_tool_call(&call_id, &tool_call.title, &input)
+                .await
+            {
+                warn!("Failed to record tool call to transcript: {e}");
+            } else {
+                recorded_call_ids.insert(call_id);
+            }
+        }
+        acp::SessionUpdate::ToolCallUpdate(update) => {
+            // Only record completed tool calls
+            if update.fields.status != Some(acp::ToolCallStatus::Completed) {
+                return;
+            }
+
+            let call_id = update.tool_call_id.to_string();
+            let title = update.fields.title.clone().unwrap_or_default();
+            let kind = update.fields.kind;
+
+            // Check if this is a patch operation
+            if is_patch_operation(kind.as_ref(), &title, update.fields.raw_input.as_ref()) {
+                // Record as patch operation
+                let operation = match kind {
+                    Some(acp::ToolKind::Edit) => crate::transcript::PatchOperationType::Edit,
+                    Some(acp::ToolKind::Delete) => crate::transcript::PatchOperationType::Delete,
+                    _ => {
+                        // Default to Write for other kinds (including None)
+                        crate::transcript::PatchOperationType::Write
+                    }
+                };
+
+                // Extract path from raw_input or locations
+                let path = update
+                    .fields
+                    .raw_input
+                    .as_ref()
+                    .and_then(|input| {
+                        input
+                            .get("file_path")
+                            .or_else(|| input.get("path"))
+                            .and_then(|v| v.as_str())
+                            .map(PathBuf::from)
+                    })
+                    .or_else(|| {
+                        update
+                            .fields
+                            .locations
+                            .as_ref()
+                            .and_then(|locs| locs.first())
+                            .map(|loc| loc.path.clone())
+                    })
+                    .unwrap_or_else(|| PathBuf::from("unknown"));
+
+                // Completed status means success (Failed status handled separately)
+                if let Err(e) = recorder
+                    .record_patch_apply(&call_id, operation, &path, true, None)
+                    .await
+                {
+                    warn!("Failed to record patch apply to transcript: {e}");
+                }
+            } else {
+                // Record as tool result for non-patch operations
+                let output = extract_tool_output(&update.fields);
+                let truncated = output.len() > 10000;
+                let output_to_record = if truncated {
+                    format!("{}... (truncated)", &output[..10000])
+                } else {
+                    output
+                };
+
+                // Extract exit_code from raw_output if available
+                let exit_code = update
+                    .fields
+                    .raw_output
+                    .as_ref()
+                    .and_then(|v| v.get("exit_code"))
+                    .and_then(serde_json::Value::as_i64)
+                    .map(|v| v as i32);
+
+                if let Err(e) = recorder
+                    .record_tool_result(&call_id, &output_to_record, truncated, exit_code)
+                    .await
+                {
+                    warn!("Failed to record tool result to transcript: {e}");
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2514,6 +2712,7 @@ mod tests {
             os_notifications: crate::config::OsNotifications::Disabled,
             nori_home: temp_dir.path().to_path_buf(),
             history_persistence: crate::config::HistoryPersistence::SaveAll,
+            cli_version: "test".to_string(),
             notify_after_idle: crate::config::NotifyAfterIdle::FiveSeconds,
         };
 
@@ -2693,6 +2892,7 @@ mod tests {
             os_notifications: crate::config::OsNotifications::Disabled,
             nori_home: temp_dir.path().to_path_buf(),
             history_persistence: crate::config::HistoryPersistence::SaveAll,
+            cli_version: "test".to_string(),
             notify_after_idle: crate::config::NotifyAfterIdle::FiveSeconds,
         };
 
@@ -2806,6 +3006,7 @@ mod tests {
             os_notifications: crate::config::OsNotifications::Disabled,
             nori_home: temp_dir.path().to_path_buf(),
             history_persistence: crate::config::HistoryPersistence::SaveAll,
+            cli_version: "test".to_string(),
             notify_after_idle: crate::config::NotifyAfterIdle::FiveSeconds,
         };
 
@@ -2941,6 +3142,7 @@ mod tests {
             os_notifications: crate::config::OsNotifications::Disabled,
             nori_home: temp_dir.path().to_path_buf(),
             history_persistence: crate::config::HistoryPersistence::SaveAll,
+            cli_version: "test".to_string(),
             notify_after_idle: crate::config::NotifyAfterIdle::FiveSeconds,
         };
 

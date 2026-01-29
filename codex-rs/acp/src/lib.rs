@@ -13,6 +13,7 @@ pub mod message_history;
 pub mod registry;
 pub mod session_parser;
 pub mod tracing_setup;
+pub mod transcript;
 pub mod transcript_discovery;
 pub mod translator;
 
@@ -58,6 +59,14 @@ pub use transcript_discovery::parse_transcript_tokens;
 pub use transcript_discovery::parse_transcript_total_tokens;
 pub use translator::TranslatedEvent;
 pub use translator::translate_session_update;
+
+// Re-export transcript types
+pub use transcript::ProjectId;
+pub use transcript::ProjectInfo;
+pub use transcript::SessionInfo;
+pub use transcript::Transcript;
+pub use transcript::TranscriptLoader;
+pub use transcript::TranscriptRecorder;
 
 // Re-export commonly used types from agent-client-protocol
 pub use agent_client_protocol::Agent;
