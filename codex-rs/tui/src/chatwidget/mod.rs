@@ -412,6 +412,12 @@ pub(crate) struct ChatWidget {
     turn_finished: bool,
     /// Session-local skillset name (used when per-session skillsets are active).
     pub(crate) session_skillset_name: Option<String>,
+    /// Whether plan updates are rendered in a pinned drawer instead of history cells.
+    pinned_plan_drawer: bool,
+    /// Latest plan state, always updated on every plan event. Used by the
+    /// pinned plan drawer when enabled; retained when disabled so toggling
+    /// the drawer on shows the most recent plan immediately.
+    pinned_plan: Option<UpdatePlanArgs>,
 }
 
 /// Information about a pending agent switch in ChatWidget.
