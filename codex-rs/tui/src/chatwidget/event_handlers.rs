@@ -1,4 +1,6 @@
 use super::*;
+use codex_protocol::plan_tool::PlanItemArg;
+use codex_protocol::plan_tool::StepStatus;
 
 impl ChatWidget {
     pub(super) fn flush_answer_stream_with_separator(&mut self) {
@@ -182,6 +184,7 @@ impl ChatWidget {
         self.set_status_header(crate::status_indicator_widget::random_status_message());
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
+        self.completed_client_tool_calls.clear();
         self.turn_finished = false;
         self.request_redraw();
         self.refresh_terminal_title();
@@ -213,6 +216,7 @@ impl ChatWidget {
         self.bottom_pane.set_task_running(false);
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
+        self.completed_client_tool_calls.clear();
         self.last_unified_wait = None;
         self.request_redraw();
         self.refresh_terminal_title();
@@ -316,6 +320,7 @@ impl ChatWidget {
         self.bottom_pane.set_task_running(false);
         self.running_commands.clear();
         self.suppressed_exec_calls.clear();
+        self.completed_client_tool_calls.clear();
         self.last_unified_wait = None;
         self.stream_controller = None;
     }
@@ -1153,5 +1158,575 @@ impl ChatWidget {
         debug!("received {len} custom prompts");
         // Forward to bottom pane so the slash popup can show them now.
         self.bottom_pane.set_custom_prompts(ev.custom_prompts);
+    }
+
+    pub(crate) fn handle_client_event(&mut self, event: nori_protocol::ClientEvent) {
+        match event {
+            nori_protocol::ClientEvent::ApprovalRequest(approval) => {
+                self.handle_client_approval_request(approval);
+            }
+            nori_protocol::ClientEvent::ToolSnapshot(tool_snapshot) => {
+                self.handle_client_tool_snapshot(tool_snapshot);
+            }
+            nori_protocol::ClientEvent::MessageDelta(message_delta) => {
+                self.handle_client_message_delta(message_delta);
+            }
+            nori_protocol::ClientEvent::PlanSnapshot(plan_snapshot) => {
+                self.handle_client_plan_snapshot(plan_snapshot);
+            }
+            nori_protocol::ClientEvent::TurnLifecycle(turn_lifecycle) => {
+                self.handle_client_turn_lifecycle(turn_lifecycle);
+            }
+            nori_protocol::ClientEvent::ReplayEntry(replay_entry) => {
+                self.handle_client_replay_entry(replay_entry);
+            }
+        }
+    }
+
+    fn handle_client_message_delta(&mut self, message_delta: nori_protocol::MessageDelta) {
+        match message_delta.stream {
+            nori_protocol::MessageStream::Answer => {
+                self.on_agent_message_delta(message_delta.delta)
+            }
+            nori_protocol::MessageStream::Reasoning => {
+                self.on_agent_reasoning_delta(message_delta.delta);
+            }
+        }
+    }
+
+    fn handle_client_plan_snapshot(&mut self, plan_snapshot: nori_protocol::PlanSnapshot) {
+        self.on_plan_update(plan_snapshot_to_update_plan_args(plan_snapshot));
+    }
+
+    fn handle_client_turn_lifecycle(&mut self, turn_lifecycle: nori_protocol::TurnLifecycle) {
+        match turn_lifecycle {
+            nori_protocol::TurnLifecycle::Started => self.on_task_started(),
+            nori_protocol::TurnLifecycle::Completed { last_agent_message } => {
+                self.on_task_complete(last_agent_message)
+            }
+            nori_protocol::TurnLifecycle::Aborted { reason } => match reason {
+                nori_protocol::TurnAbortReason::Interrupted => {
+                    self.on_interrupted_turn(TurnAbortReason::Interrupted)
+                }
+                nori_protocol::TurnAbortReason::Replaced => {
+                    self.on_error("Turn aborted: replaced by a new task".to_owned())
+                }
+                nori_protocol::TurnAbortReason::Other(reason) => {
+                    self.on_error(format!("Turn aborted: {reason}"))
+                }
+            },
+            nori_protocol::TurnLifecycle::ContextCompacted { summary } => {
+                self.on_context_compacted(codex_core::protocol::ContextCompactedEvent { summary });
+            }
+        }
+    }
+
+    fn handle_client_replay_entry(&mut self, replay_entry: nori_protocol::ReplayEntry) {
+        match replay_entry {
+            nori_protocol::ReplayEntry::UserMessage { text } => {
+                self.add_to_history(history_cell::new_user_prompt(text));
+            }
+            nori_protocol::ReplayEntry::AssistantMessage { text } => {
+                self.handle_streaming_delta(text);
+                self.flush_answer_stream_with_separator();
+            }
+            nori_protocol::ReplayEntry::ReasoningMessage { text } => {
+                let cell = history_cell::new_reasoning_summary_block(text, &self.config);
+                self.add_boxed_history(cell);
+            }
+            nori_protocol::ReplayEntry::PlanSnapshot { snapshot } => {
+                self.add_to_history(history_cell::new_plan_update(
+                    plan_snapshot_to_update_plan_args(snapshot),
+                ));
+            }
+            nori_protocol::ReplayEntry::ToolSnapshot { snapshot } => {
+                self.handle_client_tool_snapshot(*snapshot);
+            }
+        }
+        self.request_redraw();
+    }
+
+    fn handle_client_approval_request(&mut self, approval: nori_protocol::ApprovalRequest) {
+        let Some(request) = approval_request_from_client_event(&self.config.cwd, approval) else {
+            return;
+        };
+
+        self.flush_answer_stream_with_separator();
+        match &request {
+            ApprovalRequest::ApplyPatch { changes, .. } => {
+                self.notify(Notification::EditApprovalRequested {
+                    cwd: self.config.cwd.clone(),
+                    changes: changes.keys().cloned().collect(),
+                });
+            }
+            ApprovalRequest::Exec { command, .. } => {
+                let command = shlex::try_join(command.iter().map(String::as_str))
+                    .unwrap_or_else(|_| command.join(" "));
+                self.notify(Notification::ExecApprovalRequested { command });
+            }
+            ApprovalRequest::McpElicitation { .. } => {}
+        }
+        self.bottom_pane.push_approval_request(request);
+        self.request_redraw();
+    }
+
+    fn handle_client_tool_snapshot(&mut self, tool_snapshot: nori_protocol::ToolSnapshot) {
+        match tool_snapshot.kind {
+            nori_protocol::ToolKind::Edit
+            | nori_protocol::ToolKind::Delete
+            | nori_protocol::ToolKind::Move
+                if tool_snapshot.phase == nori_protocol::ToolPhase::Completed
+                    && file_changes_from_snapshot(&tool_snapshot).is_some() =>
+            {
+                self.handle_client_edit_tool_snapshot(tool_snapshot);
+            }
+            nori_protocol::ToolKind::Execute
+            | nori_protocol::ToolKind::Read
+            | nori_protocol::ToolKind::Search
+            | nori_protocol::ToolKind::Fetch
+            | nori_protocol::ToolKind::Think
+            | nori_protocol::ToolKind::Other(_)
+                if matches!(
+                    tool_snapshot.phase,
+                    nori_protocol::ToolPhase::Pending | nori_protocol::ToolPhase::InProgress
+                ) =>
+            {
+                self.handle_client_exec_like_tool_begin_snapshot(tool_snapshot);
+            }
+            nori_protocol::ToolKind::Execute
+            | nori_protocol::ToolKind::Read
+            | nori_protocol::ToolKind::Search
+            | nori_protocol::ToolKind::Fetch
+            | nori_protocol::ToolKind::Think
+            | nori_protocol::ToolKind::Other(_)
+                if matches!(
+                    tool_snapshot.phase,
+                    nori_protocol::ToolPhase::Completed | nori_protocol::ToolPhase::Failed
+                ) =>
+            {
+                self.handle_client_exec_like_tool_snapshot(tool_snapshot);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_client_exec_like_tool_begin_snapshot(
+        &mut self,
+        tool_snapshot: nori_protocol::ToolSnapshot,
+    ) {
+        if self.turn_finished
+            || self
+                .completed_client_tool_calls
+                .contains(&tool_snapshot.call_id)
+            || self.running_commands.contains_key(&tool_snapshot.call_id)
+        {
+            return;
+        }
+
+        let Some(begin_event) =
+            exec_begin_event_from_client_snapshot(&self.config.cwd, &tool_snapshot)
+        else {
+            return;
+        };
+
+        self.on_exec_command_begin(begin_event);
+    }
+
+    fn handle_client_edit_tool_snapshot(&mut self, tool_snapshot: nori_protocol::ToolSnapshot) {
+        let Some(changes) = file_changes_from_snapshot(&tool_snapshot) else {
+            return;
+        };
+
+        if self.turn_finished {
+            return;
+        }
+
+        self.session_stats.record_tool_call("Edit");
+        self.observe_directories_from_changes(&changes);
+        self.add_to_history(history_cell::new_patch_event(changes, &self.config.cwd));
+    }
+
+    fn handle_client_exec_like_tool_snapshot(
+        &mut self,
+        tool_snapshot: nori_protocol::ToolSnapshot,
+    ) {
+        if self.turn_finished
+            || self
+                .completed_client_tool_calls
+                .contains(&tool_snapshot.call_id)
+        {
+            return;
+        }
+
+        let Some(begin_event) =
+            exec_begin_event_from_client_snapshot(&self.config.cwd, &tool_snapshot)
+        else {
+            return;
+        };
+        let end_event =
+            exec_end_event_from_client_snapshot(&self.config.cwd, &tool_snapshot, &begin_event);
+
+        if !self.running_commands.contains_key(&tool_snapshot.call_id) {
+            self.on_exec_command_begin(begin_event);
+        }
+        self.on_exec_command_end(end_event);
+        self.completed_client_tool_calls
+            .insert(tool_snapshot.call_id);
+    }
+}
+
+fn exec_begin_event_from_client_snapshot(
+    cwd: &std::path::Path,
+    snapshot: &nori_protocol::ToolSnapshot,
+) -> Option<ExecCommandBeginEvent> {
+    let (command, parsed_cmd) = match snapshot.invocation.as_ref() {
+        Some(nori_protocol::Invocation::Command {
+            command: actual_command,
+        }) => {
+            let command_text = formatted_client_tool_command_text(
+                &snapshot.title,
+                snapshot.raw_input.as_ref(),
+                Some(actual_command),
+            )
+            .unwrap_or_else(|| actual_command.clone());
+            (
+                vec![command_text.clone()],
+                vec![ParsedCommand::Unknown { cmd: command_text }],
+            )
+        }
+        Some(nori_protocol::Invocation::Read { path }) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            (
+                vec![snapshot.title.clone()],
+                vec![ParsedCommand::Read {
+                    cmd: snapshot.title.clone(),
+                    name,
+                    path: path.clone(),
+                }],
+            )
+        }
+        Some(nori_protocol::Invocation::Search { query, path }) => (
+            vec![snapshot.title.clone()],
+            vec![ParsedCommand::Search {
+                cmd: snapshot.title.clone(),
+                query: query.clone(),
+                path: path.as_ref().map(|value| value.display().to_string()),
+            }],
+        ),
+        Some(nori_protocol::Invocation::ListFiles { path }) => (
+            vec![snapshot.title.clone()],
+            vec![ParsedCommand::ListFiles {
+                cmd: snapshot.title.clone(),
+                path: path.as_ref().map(|value| value.display().to_string()),
+            }],
+        ),
+        Some(nori_protocol::Invocation::Tool { tool_name, input }) => {
+            let command_text = generic_tool_command_text(tool_name, input.as_ref(), snapshot);
+            (
+                vec![command_text.clone()],
+                vec![ParsedCommand::Unknown { cmd: command_text }],
+            )
+        }
+        Some(nori_protocol::Invocation::RawJson(raw_input)) => {
+            let command_text =
+                generic_tool_command_text(&snapshot.title, Some(raw_input), snapshot);
+            (
+                vec![command_text.clone()],
+                vec![ParsedCommand::Unknown { cmd: command_text }],
+            )
+        }
+        Some(_) => return None,
+        None if snapshot.kind == nori_protocol::ToolKind::Execute => {
+            let command_text = generic_execute_command_text(snapshot);
+            (
+                vec![command_text.clone()],
+                vec![ParsedCommand::Unknown { cmd: command_text }],
+            )
+        }
+        None if matches!(
+            snapshot.kind,
+            nori_protocol::ToolKind::Fetch
+                | nori_protocol::ToolKind::Think
+                | nori_protocol::ToolKind::Other(_)
+        ) =>
+        {
+            let command_text =
+                generic_tool_command_text(&snapshot.title, snapshot.raw_input.as_ref(), snapshot);
+            (
+                vec![command_text.clone()],
+                vec![ParsedCommand::Unknown { cmd: command_text }],
+            )
+        }
+        None => return None,
+    };
+
+    Some(ExecCommandBeginEvent {
+        call_id: snapshot.call_id.clone(),
+        process_id: None,
+        turn_id: String::new(),
+        command,
+        cwd: cwd.to_path_buf(),
+        parsed_cmd,
+        source: ExecCommandSource::Agent,
+        interaction_input: None,
+    })
+}
+
+fn generic_execute_command_text(snapshot: &nori_protocol::ToolSnapshot) -> String {
+    formatted_client_tool_command_text(&snapshot.title, snapshot.raw_input.as_ref(), None)
+        .unwrap_or_else(|| snapshot.title.clone())
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn formatted_client_tool_command_text(
+    title: &str,
+    raw_input: Option<&serde_json::Value>,
+    fallback_arg: Option<&str>,
+) -> Option<String> {
+    let args = raw_input
+        .and_then(extract_client_tool_display_args)
+        .or_else(|| fallback_arg.map(str::to_string));
+
+    match args {
+        Some(args) if !args.is_empty() && !title.contains(&args) => {
+            Some(format!("{title}({args})"))
+        }
+        Some(_) => Some(title.to_string()),
+        None => None,
+    }
+}
+
+fn extract_client_tool_display_args(input: &serde_json::Value) -> Option<String> {
+    input
+        .get("command")
+        .or_else(|| input.get("cmd"))
+        .or_else(|| input.get("path"))
+        .or_else(|| input.get("query"))
+        .or_else(|| input.get("pattern"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn generic_tool_command_text(
+    tool_name: &str,
+    input: Option<&serde_json::Value>,
+    snapshot: &nori_protocol::ToolSnapshot,
+) -> String {
+    match input {
+        Some(raw_input)
+            if !raw_input.is_null()
+                && !raw_input.as_object().is_some_and(serde_json::Map::is_empty) =>
+        {
+            format!("{tool_name} {}", compact_json(raw_input))
+        }
+        _ => snapshot.title.clone(),
+    }
+}
+
+fn exec_end_event_from_client_snapshot(
+    cwd: &std::path::Path,
+    snapshot: &nori_protocol::ToolSnapshot,
+    begin_event: &ExecCommandBeginEvent,
+) -> ExecCommandEndEvent {
+    let output = snapshot
+        .artifacts
+        .iter()
+        .find_map(|artifact| match artifact {
+            nori_protocol::Artifact::Text { text } if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let exit_code = if snapshot.phase == nori_protocol::ToolPhase::Failed {
+        snapshot
+            .raw_output
+            .as_ref()
+            .and_then(|raw| raw.get("exit_code"))
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok())
+            .unwrap_or(1)
+    } else {
+        0
+    };
+
+    ExecCommandEndEvent {
+        call_id: snapshot.call_id.clone(),
+        process_id: None,
+        turn_id: String::new(),
+        command: begin_event.command.clone(),
+        cwd: cwd.to_path_buf(),
+        parsed_cmd: begin_event.parsed_cmd.clone(),
+        source: ExecCommandSource::Agent,
+        interaction_input: None,
+        stdout: output.clone(),
+        stderr: String::new(),
+        aggregated_output: output.clone(),
+        exit_code,
+        duration: Duration::from_millis(0),
+        formatted_output: output,
+    }
+}
+
+fn approval_request_from_client_event(
+    cwd: &std::path::Path,
+    approval: nori_protocol::ApprovalRequest,
+) -> Option<ApprovalRequest> {
+    let nori_protocol::ApprovalSubject::ToolSnapshot(snapshot) = approval.subject;
+
+    if matches!(
+        snapshot.kind,
+        nori_protocol::ToolKind::Edit
+            | nori_protocol::ToolKind::Delete
+            | nori_protocol::ToolKind::Move
+    ) && let Some(changes) = file_changes_from_snapshot(&snapshot)
+    {
+        return Some(ApprovalRequest::ApplyPatch {
+            id: approval.call_id,
+            reason: None,
+            cwd: cwd.to_path_buf(),
+            changes,
+        });
+    }
+
+    Some(ApprovalRequest::Exec {
+        id: approval.call_id,
+        command: approval_command_from_snapshot(&snapshot),
+        reason: None,
+        risk: None,
+    })
+}
+
+fn file_changes_from_snapshot(
+    snapshot: &nori_protocol::ToolSnapshot,
+) -> Option<HashMap<PathBuf, codex_core::protocol::FileChange>> {
+    match &snapshot.invocation {
+        Some(nori_protocol::Invocation::FileChanges { changes }) => {
+            let file_changes = changes
+                .iter()
+                .map(|change| (change.path.clone(), file_change_from_nori_change(change)))
+                .collect::<HashMap<_, _>>();
+            if file_changes.is_empty() {
+                None
+            } else {
+                Some(file_changes)
+            }
+        }
+        Some(nori_protocol::Invocation::FileOperations { operations }) => {
+            let file_changes = operations
+                .iter()
+                .map(file_change_from_nori_operation)
+                .collect::<HashMap<_, _>>();
+            if file_changes.is_empty() {
+                None
+            } else {
+                Some(file_changes)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn approval_command_from_snapshot(snapshot: &nori_protocol::ToolSnapshot) -> Vec<String> {
+    match snapshot.invocation.as_ref() {
+        Some(nori_protocol::Invocation::Command { command }) => {
+            vec!["bash".into(), "-lc".into(), command.clone()]
+        }
+        Some(nori_protocol::Invocation::Tool { tool_name, input }) => {
+            vec![generic_tool_command_text(
+                tool_name,
+                input.as_ref(),
+                snapshot,
+            )]
+        }
+        Some(nori_protocol::Invocation::Read { .. })
+        | Some(nori_protocol::Invocation::Search { .. })
+        | Some(nori_protocol::Invocation::ListFiles { .. })
+        | Some(nori_protocol::Invocation::RawJson(_))
+        | Some(nori_protocol::Invocation::FileChanges { .. })
+        | Some(nori_protocol::Invocation::FileOperations { .. })
+        | None => vec![generic_execute_command_text(snapshot)],
+    }
+}
+
+fn file_change_from_nori_operation(
+    operation: &nori_protocol::FileOperation,
+) -> (PathBuf, codex_core::protocol::FileChange) {
+    match operation {
+        nori_protocol::FileOperation::Create { path, new_text } => (
+            path.clone(),
+            codex_core::protocol::FileChange::Add {
+                content: new_text.clone(),
+            },
+        ),
+        nori_protocol::FileOperation::Update {
+            path,
+            old_text,
+            new_text,
+        } => (
+            path.clone(),
+            codex_core::protocol::FileChange::Update {
+                unified_diff: diffy::create_patch(old_text, new_text).to_string(),
+                move_path: None,
+            },
+        ),
+        nori_protocol::FileOperation::Delete { path, old_text } => (
+            path.clone(),
+            codex_core::protocol::FileChange::Delete {
+                content: old_text.clone().unwrap_or_default(),
+            },
+        ),
+        nori_protocol::FileOperation::Move {
+            from_path,
+            to_path,
+            old_text,
+            new_text,
+        } => {
+            let old_text = old_text.clone().unwrap_or_default();
+            let new_text = new_text.clone().unwrap_or_else(|| old_text.clone());
+            (
+                from_path.clone(),
+                codex_core::protocol::FileChange::Update {
+                    unified_diff: diffy::create_patch(&old_text, &new_text).to_string(),
+                    move_path: Some(to_path.clone()),
+                },
+            )
+        }
+    }
+}
+
+fn file_change_from_nori_change(
+    change: &nori_protocol::FileChange,
+) -> codex_core::protocol::FileChange {
+    match &change.old_text {
+        None => codex_core::protocol::FileChange::Add {
+            content: change.new_text.clone(),
+        },
+        Some(old_text) => codex_core::protocol::FileChange::Update {
+            unified_diff: diffy::create_patch(old_text, &change.new_text).to_string(),
+            move_path: None,
+        },
+    }
+}
+
+fn plan_snapshot_to_update_plan_args(plan_snapshot: nori_protocol::PlanSnapshot) -> UpdatePlanArgs {
+    UpdatePlanArgs {
+        explanation: None,
+        plan: plan_snapshot
+            .entries
+            .into_iter()
+            .map(|entry| PlanItemArg {
+                step: entry.step,
+                status: match entry.status {
+                    nori_protocol::PlanStatus::Pending => StepStatus::Pending,
+                    nori_protocol::PlanStatus::InProgress => StepStatus::InProgress,
+                    nori_protocol::PlanStatus::Completed => StepStatus::Completed,
+                },
+            })
+            .collect(),
     }
 }
