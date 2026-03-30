@@ -57,6 +57,12 @@ The transcript pager overlay uses each history cell's transcript view rather tha
 
 Approval requests from ACP agents are handled through `bottom_pane/approval.rs`. Live ACP approvals arrive as `ClientEvent::ApprovalRequest`, are normalized into the TUI's existing approval UI model in `chatwidget/event_handlers.rs`, and then render through the same command/patch approval pane used elsewhere in the app.
 
+**ClientToolCell Rendering** (`client_tool_cell.rs`):
+
+`ClientToolCell` wraps a `nori_protocol::ToolSnapshot` and implements `HistoryCell`. It dispatches on `ToolKind` to select between two rendering paths: `ToolKind::Execute` uses `render_execute_lines(width)` for ExecCell-parity display (colored bullet, "Ran"/"Running" verb, bash syntax highlighting, output with truncation), while all other tool kinds use `render_generic_lines()` for the generic `"Tool [phase]: title (kind)"` format with invocation/artifact details.
+
+The execute rendering path reuses shared utilities from `exec_cell/render.rs` (`truncate_lines_middle`, `limit_lines_from_start`, `output_lines`, `spinner`) and layout constants that match the `ExecCell` display layout (`"  │ "` for command continuation, `"  └ "` for output). Output text is sourced preferentially from `raw_output["stdout"]`, falling back to `Artifact::Text` with code fence stripping. Exit code success is determined from `raw_output["exit_code"]` when present, otherwise inferred from `ToolPhase`.
+
 **Chronological Ordering Invariant** (`chatwidget/event_handlers.rs`, `chatwidget/user_input.rs`):
 
 Tool cells always appear in scrollback history before the agent text that follows them, matching the chronological order of execution. This is enforced by two mechanisms:
