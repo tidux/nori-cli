@@ -101,7 +101,6 @@ impl ChatWidget {
             #[cfg(feature = "nori-config")]
             loop_count_override: None,
             turn_finished: false,
-            pending_stale_completes: 0,
             plan_drawer_mode: PlanDrawerMode::Off,
             pinned_plan: None,
             terminal_title_animation_origin: std::time::Instant::now(),
@@ -212,7 +211,6 @@ impl ChatWidget {
             #[cfg(feature = "nori-config")]
             loop_count_override: None,
             turn_finished: false,
-            pending_stale_completes: 0,
             plan_drawer_mode: PlanDrawerMode::Off,
             pinned_plan: None,
             terminal_title_animation_origin: std::time::Instant::now(),
