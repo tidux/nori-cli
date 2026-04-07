@@ -80,10 +80,6 @@ impl ChatWidget {
         // showing description text as command output.
         self.pending_client_tool_cells.clear();
 
-        // Close the gate BEFORE flushing: any tool events arriving after this
-        // point are stale and should be silently discarded.
-        self.turn_finished = true;
-
         // Handle pending task_complete state.
         if self.task_complete_pending {
             self.bottom_pane.hide_status_indicator();
@@ -106,7 +102,6 @@ impl ChatWidget {
     ) {
         // Step 1: Flush the streamed summary from the old session.
         self.flush_answer_stream_with_separator();
-        self.turn_finished = true;
         self.pending_client_tool_cells.clear();
 
         // Step 2: Show "Context compacted" as an info message.
@@ -128,11 +123,9 @@ impl ChatWidget {
             ));
 
             // Step 4: Reprint the summary as the first assistant message of the
-            // new session. Reset turn_finished so streaming works.
-            self.turn_finished = false;
+            // new session.
             self.handle_streaming_delta(summary);
             self.flush_answer_stream_with_separator();
-            self.turn_finished = true;
         }
 
         self.request_redraw();
@@ -190,7 +183,6 @@ impl ChatWidget {
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
         self.completed_client_tool_calls.clear();
-        self.turn_finished = false;
         self.request_redraw();
         self.refresh_terminal_title();
     }
@@ -198,11 +190,6 @@ impl ChatWidget {
     pub(super) fn on_task_complete(&mut self, last_agent_message: Option<String>) {
         // If a stream is currently active, finalize it.
         self.flush_answer_stream_with_separator();
-
-        // Close the gate: any tool events arriving after this point are stale
-        // and should be silently discarded. This mirrors on_agent_message() in
-        // the codex flow.
-        self.turn_finished = true;
 
         // Process any deferred completion events (ExecEnd, McpEnd, PatchEnd) so
         // in-progress tool cells transition to their finished state ("Running" →
@@ -221,7 +208,7 @@ impl ChatWidget {
         self.pending_client_tool_cells.clear();
 
         // Safety net: finalize any incomplete ExecCell still stuck in active_cell.
-        // This can happen when tool End events are blocked by the turn_finished gate
+        // This can happen when tool End events arrive after the request has already finished
         // (ACP race condition) or when streaming text kept the cell in active_cell.
         self.finalize_active_cell_as_failed();
 
@@ -242,8 +229,6 @@ impl ChatWidget {
                 agent: Some(self.config.model.clone()),
             });
 
-        // If there is a queued user message, send exactly one now to begin the next turn.
-        self.maybe_send_next_queued_input();
         // Emit a notification when the turn completes (suppressed if focused).
         self.notify(Notification::AgentTurnComplete {
             response: last_agent_message.unwrap_or_default(),
@@ -347,7 +332,6 @@ impl ChatWidget {
         self.request_redraw();
 
         // After an error ends the turn, try sending the next queued input.
-        self.maybe_send_next_queued_input();
     }
 
     pub(super) fn on_warning(&mut self, message: impl Into<String>) {
@@ -419,46 +403,8 @@ impl ChatWidget {
 
         self.mcp_startup_status = None;
         self.bottom_pane.set_task_running(false);
-        self.maybe_send_next_queued_input();
         self.request_redraw();
         self.refresh_terminal_title();
-    }
-
-    /// Handle a turn aborted due to user interrupt (Esc).
-    /// When there are queued user messages, restore them into the composer
-    /// separated by newlines rather than auto‑submitting the next one.
-    pub(super) fn on_interrupted_turn(&mut self, _reason: TurnAbortReason) {
-        // Finalize, log a gentle prompt, and clear running state.
-        self.finalize_turn();
-        self.cancel_loop();
-
-        self.add_to_history(history_cell::new_error_event(
-            "Conversation interrupted - tell the model what to do differently. Something went wrong? Report the issue at https://github.com/tilework-tech/nori-cli/issues".to_owned(),
-        ));
-
-        // If any messages were queued during the task, restore them into the composer.
-        if !self.queued_user_messages.is_empty() {
-            let queued_text = self
-                .queued_user_messages
-                .iter()
-                .map(|m| m.text.clone())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let existing_text = self.bottom_pane.composer_text();
-            let combined = if existing_text.is_empty() {
-                queued_text
-            } else if queued_text.is_empty() {
-                existing_text
-            } else {
-                format!("{queued_text}\n{existing_text}")
-            };
-            self.bottom_pane.set_composer_text(combined);
-            // Clear the queue and update the status indicator list.
-            self.queued_user_messages.clear();
-            self.refresh_queued_user_messages();
-        }
-
-        self.request_redraw();
     }
 
     pub(super) fn on_plan_update(&mut self, update: UpdatePlanArgs) {
@@ -498,9 +444,6 @@ impl ChatWidget {
     }
 
     pub(super) fn on_exec_command_begin(&mut self, ev: ExecCommandBeginEvent) {
-        if self.turn_finished {
-            return;
-        }
         self.flush_answer_stream_with_separator();
         let ev2 = ev.clone();
         self.defer_or_handle(|q| q.push_exec_begin(ev), |s| s.handle_exec_begin_now(ev2));
@@ -514,9 +457,6 @@ impl ChatWidget {
     }
 
     pub(super) fn on_patch_apply_begin(&mut self, event: PatchApplyBeginEvent) {
-        if self.turn_finished {
-            return;
-        }
         // Track Edit tool call for session statistics
         self.session_stats.record_tool_call("Edit");
 
@@ -530,9 +470,6 @@ impl ChatWidget {
     }
 
     pub(super) fn on_view_image_tool_call(&mut self, event: ViewImageToolCallEvent) {
-        if self.turn_finished {
-            return;
-        }
         // Track ViewImage tool call for session statistics
         self.session_stats.record_tool_call("ViewImage");
 
@@ -545,9 +482,6 @@ impl ChatWidget {
     }
 
     pub(super) fn on_patch_apply_end(&mut self, event: codex_core::protocol::PatchApplyEndEvent) {
-        if self.turn_finished {
-            return;
-        }
         self.flush_answer_stream_with_separator();
         let ev2 = event.clone();
         self.defer_or_handle(
@@ -557,27 +491,18 @@ impl ChatWidget {
     }
 
     pub(super) fn on_exec_command_end(&mut self, ev: ExecCommandEndEvent) {
-        if self.turn_finished {
-            return;
-        }
         self.flush_answer_stream_with_separator();
         let ev2 = ev.clone();
         self.defer_or_handle(|q| q.push_exec_end(ev), |s| s.handle_exec_end_now(ev2));
     }
 
     pub(super) fn on_mcp_tool_call_begin(&mut self, ev: McpToolCallBeginEvent) {
-        if self.turn_finished {
-            return;
-        }
         self.flush_answer_stream_with_separator();
         let ev2 = ev.clone();
         self.defer_or_handle(|q| q.push_mcp_begin(ev), |s| s.handle_mcp_begin_now(ev2));
     }
 
     pub(super) fn on_mcp_tool_call_end(&mut self, ev: McpToolCallEndEvent) {
-        if self.turn_finished {
-            return;
-        }
         self.flush_answer_stream_with_separator();
         let ev2 = ev.clone();
         self.defer_or_handle(|q| q.push_mcp_end(ev), |s| s.handle_mcp_end_now(ev2));
@@ -1196,8 +1121,24 @@ impl ChatWidget {
             nori_protocol::ClientEvent::PlanSnapshot(plan_snapshot) => {
                 self.handle_client_plan_snapshot(plan_snapshot);
             }
-            nori_protocol::ClientEvent::TurnLifecycle(turn_lifecycle) => {
-                self.handle_client_turn_lifecycle(turn_lifecycle);
+            nori_protocol::ClientEvent::SessionPhaseChanged(phase) => {
+                self.handle_client_phase_changed(phase);
+            }
+            nori_protocol::ClientEvent::PromptCompleted(completed) => {
+                self.handle_client_prompt_completed(completed);
+            }
+            nori_protocol::ClientEvent::LoadCompleted => {
+                self.request_redraw();
+            }
+            nori_protocol::ClientEvent::QueueChanged(queue_changed) => {
+                self.bottom_pane
+                    .set_queued_user_messages(queue_changed.prompts);
+                self.request_redraw();
+            }
+            nori_protocol::ClientEvent::ContextCompacted(context_compacted) => {
+                self.on_context_compacted(codex_core::protocol::ContextCompactedEvent {
+                    summary: context_compacted.summary,
+                });
             }
             nori_protocol::ClientEvent::ReplayEntry(replay_entry) => {
                 self.handle_client_replay_entry(replay_entry);
@@ -1226,30 +1167,67 @@ impl ChatWidget {
         self.on_plan_update(plan_snapshot_to_update_plan_args(plan_snapshot));
     }
 
-    fn handle_client_turn_lifecycle(&mut self, turn_lifecycle: nori_protocol::TurnLifecycle) {
-        match turn_lifecycle {
-            nori_protocol::TurnLifecycle::Started => self.on_task_started(),
-            nori_protocol::TurnLifecycle::Completed { last_agent_message } => {
-                self.on_task_complete(last_agent_message)
-            }
-            nori_protocol::TurnLifecycle::Aborted { reason } => match reason {
-                nori_protocol::TurnAbortReason::Interrupted => {
-                    self.on_interrupted_turn(TurnAbortReason::Interrupted)
+    fn handle_client_phase_changed(
+        &mut self,
+        phase: nori_protocol::session_runtime::SessionPhaseView,
+    ) {
+        let previous_phase = self.acp_session_phase.replace(phase);
+
+        match phase {
+            nori_protocol::session_runtime::SessionPhaseView::Idle => {
+                self.bottom_pane.set_task_running(false);
+                self.bottom_pane.set_interrupt_hint_visible(false);
+                if !matches!(
+                    previous_phase,
+                    Some(nori_protocol::session_runtime::SessionPhaseView::Idle)
+                ) {
+                    self.request_redraw();
+                    self.refresh_terminal_title();
                 }
-                nori_protocol::TurnAbortReason::Replaced => {
-                    self.on_error("Turn aborted: replaced by a new task".to_owned())
-                }
-                nori_protocol::TurnAbortReason::Other(reason) => {
-                    self.on_error(format!("Turn aborted: {reason}"))
-                }
-            },
-            nori_protocol::TurnLifecycle::ContextCompacted { summary } => {
-                self.on_context_compacted(codex_core::protocol::ContextCompactedEvent { summary });
             }
-            nori_protocol::TurnLifecycle::Cancelling => {
-                // For now, treat as a no-op. Phase 2 will add proper
-                // cancelling state tracking in the TUI.
+            nori_protocol::session_runtime::SessionPhaseView::Loading => {
+                self.bottom_pane.set_task_running(true);
+                self.bottom_pane.ensure_status_indicator();
+                self.bottom_pane.set_interrupt_hint_visible(false);
+                self.set_status_header("Loading session".to_string());
+                self.request_redraw();
+                self.refresh_terminal_title();
             }
+            nori_protocol::session_runtime::SessionPhaseView::Prompt => {
+                if matches!(
+                    previous_phase,
+                    Some(nori_protocol::session_runtime::SessionPhaseView::Prompt)
+                        | Some(nori_protocol::session_runtime::SessionPhaseView::Cancelling)
+                ) {
+                    self.bottom_pane.set_task_running(true);
+                    self.bottom_pane.ensure_status_indicator();
+                    self.bottom_pane.set_interrupt_hint_visible(true);
+                    self.request_redraw();
+                    self.refresh_terminal_title();
+                } else {
+                    self.on_task_started();
+                }
+            }
+            nori_protocol::session_runtime::SessionPhaseView::Cancelling => {
+                self.bottom_pane.set_task_running(true);
+                self.bottom_pane.ensure_status_indicator();
+                self.bottom_pane.set_interrupt_hint_visible(false);
+                self.set_status_header("Cancelling".to_string());
+                self.request_redraw();
+                self.refresh_terminal_title();
+            }
+        }
+    }
+
+    fn handle_client_prompt_completed(&mut self, completed: nori_protocol::PromptCompleted) {
+        let interrupted = completed.stop_reason == nori_protocol::StopReason::Cancelled;
+        self.on_task_complete(completed.last_agent_message);
+        if interrupted {
+            self.add_to_history(history_cell::new_error_event(
+                "Conversation interrupted - tell the model what to do differently. Something went wrong? Report the issue at https://github.com/tilework-tech/nori-cli/issues"
+                    .to_owned(),
+            ));
+            self.request_redraw();
         }
     }
 
@@ -1311,9 +1289,6 @@ impl ChatWidget {
     /// ClientToolCell auto-detects exploring tools (Read/Search) and renders
     /// them with "Explored" format, while Execute uses shell-style transcript.
     fn handle_client_tool_snapshot(&mut self, tool_snapshot: nori_protocol::ToolSnapshot) {
-        if self.turn_finished {
-            return;
-        }
         self.flush_answer_stream_with_separator();
 
         // For completed Create/Edit/Delete/Move, observe directories and record stats

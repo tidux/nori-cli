@@ -78,7 +78,6 @@ impl ChatWidget {
             current_status_header: crate::status_indicator_widget::random_status_message(),
             retry_status_header: None,
             conversation_id: None,
-            queued_user_messages: VecDeque::new(),
             show_welcome_banner: true,
             suppress_session_configured_redraw: false,
             pending_notification: None,
@@ -100,7 +99,7 @@ impl ChatWidget {
             loop_total: None,
             #[cfg(feature = "nori-config")]
             loop_count_override: None,
-            turn_finished: false,
+            acp_session_phase: None,
             plan_drawer_mode: PlanDrawerMode::Off,
             pinned_plan: None,
             terminal_title_animation_origin: std::time::Instant::now(),
@@ -188,7 +187,6 @@ impl ChatWidget {
             current_status_header: crate::status_indicator_widget::random_status_message(),
             retry_status_header: None,
             conversation_id: None,
-            queued_user_messages: VecDeque::new(),
             show_welcome_banner: false,
             suppress_session_configured_redraw: false,
             pending_notification: None,
@@ -210,7 +208,7 @@ impl ChatWidget {
             loop_total: None,
             #[cfg(feature = "nori-config")]
             loop_count_override: None,
-            turn_finished: false,
+            acp_session_phase: None,
             plan_drawer_mode: PlanDrawerMode::Off,
             pinned_plan: None,
             terminal_title_animation_origin: std::time::Instant::now(),

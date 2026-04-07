@@ -266,44 +266,43 @@ fn normalized_reasoning_message_delta_updates_status_header() {
 }
 
 #[test]
-fn normalized_turn_started_sets_task_running() {
+fn normalized_prompt_phase_sets_task_running() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 
-    chat.handle_client_event(nori_protocol::ClientEvent::TurnLifecycle(
-        nori_protocol::TurnLifecycle::Started,
+    chat.handle_client_event(nori_protocol::ClientEvent::SessionPhaseChanged(
+        nori_protocol::session_runtime::SessionPhaseView::Prompt,
     ));
 
     assert!(chat.bottom_pane.is_task_running());
 }
 
 #[test]
-fn normalized_turn_aborted_restores_queued_messages_into_composer() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+fn normalized_cancelling_phase_keeps_composer_queue_unchanged() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual();
 
-    chat.bottom_pane.set_task_running(true);
-    chat.queued_user_messages
-        .push_back(UserMessage::from("first queued".to_string()));
-    chat.queued_user_messages
-        .push_back(UserMessage::from("second queued".to_string()));
-    chat.refresh_queued_user_messages();
+    chat.handle_client_event(nori_protocol::ClientEvent::SessionPhaseChanged(
+        nori_protocol::session_runtime::SessionPhaseView::Prompt,
+    ));
+    chat.bottom_pane
+        .set_composer_text("draft while cancelling".to_string());
 
-    chat.handle_client_event(nori_protocol::ClientEvent::TurnLifecycle(
-        nori_protocol::TurnLifecycle::Aborted {
-            reason: nori_protocol::TurnAbortReason::Interrupted,
+    chat.handle_client_event(nori_protocol::ClientEvent::QueueChanged(
+        nori_protocol::QueueChanged {
+            prompts: vec!["first queued".to_string(), "second queued".to_string()],
         },
+    ));
+    chat.handle_client_event(nori_protocol::ClientEvent::SessionPhaseChanged(
+        nori_protocol::session_runtime::SessionPhaseView::Cancelling,
     ));
 
     assert_eq!(
-        chat.bottom_pane.composer_text(),
-        "first queued\nsecond queued"
+        (
+            chat.bottom_pane.composer_text(),
+            chat.bottom_pane.is_task_running(),
+            op_rx.try_recv().is_err(),
+        ),
+        ("draft while cancelling".to_string(), true, true)
     );
-    assert!(chat.queued_user_messages.is_empty());
-    assert!(
-        op_rx.try_recv().is_err(),
-        "unexpected outbound op after interrupt"
-    );
-
-    let _ = drain_insert_history(&mut rx);
 }
 
 #[test]
@@ -417,79 +416,6 @@ fn approval_modal_exec_from_client_event() {
         contents.contains("git status"),
         "expected exec approval modal: {contents:?}"
     );
-}
-
-#[test]
-fn interrupt_restores_queued_messages_into_composer() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
-
-    // Simulate a running task to enable queuing of user inputs.
-    chat.bottom_pane.set_task_running(true);
-
-    // Queue two user messages while the task is running.
-    chat.queued_user_messages
-        .push_back(UserMessage::from("first queued".to_string()));
-    chat.queued_user_messages
-        .push_back(UserMessage::from("second queued".to_string()));
-    chat.refresh_queued_user_messages();
-
-    // Deliver a TurnAborted event with Interrupted reason (as if Esc was pressed).
-    chat.handle_codex_event(Event {
-        id: "turn-1".into(),
-        msg: EventMsg::TurnAborted(codex_core::protocol::TurnAbortedEvent {
-            reason: TurnAbortReason::Interrupted,
-        }),
-    });
-
-    // Composer should now contain the queued messages joined by newlines, in order.
-    assert_eq!(
-        chat.bottom_pane.composer_text(),
-        "first queued\nsecond queued"
-    );
-
-    // Queue should be cleared and no new user input should have been auto-submitted.
-    assert!(chat.queued_user_messages.is_empty());
-    assert!(
-        op_rx.try_recv().is_err(),
-        "unexpected outbound op after interrupt"
-    );
-
-    // Drain rx to avoid unused warnings.
-    let _ = drain_insert_history(&mut rx);
-}
-
-#[test]
-fn interrupt_prepends_queued_messages_before_existing_composer_text() {
-    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
-
-    chat.bottom_pane.set_task_running(true);
-    chat.bottom_pane
-        .set_composer_text("current draft".to_string());
-
-    chat.queued_user_messages
-        .push_back(UserMessage::from("first queued".to_string()));
-    chat.queued_user_messages
-        .push_back(UserMessage::from("second queued".to_string()));
-    chat.refresh_queued_user_messages();
-
-    chat.handle_codex_event(Event {
-        id: "turn-1".into(),
-        msg: EventMsg::TurnAborted(codex_core::protocol::TurnAbortedEvent {
-            reason: TurnAbortReason::Interrupted,
-        }),
-    });
-
-    assert_eq!(
-        chat.bottom_pane.composer_text(),
-        "first queued\nsecond queued\ncurrent draft"
-    );
-    assert!(chat.queued_user_messages.is_empty());
-    assert!(
-        op_rx.try_recv().is_err(),
-        "unexpected outbound op after interrupt"
-    );
-
-    let _ = drain_insert_history(&mut rx);
 }
 
 #[test]

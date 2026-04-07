@@ -27,16 +27,6 @@ impl AcpBackend {
                         session_reducer::InboundEvent::CancelSubmit,
                     ))
                     .await;
-                emit_client_event(
-                    &self.backend_event_tx,
-                    self.transcript_recorder.as_ref(),
-                    nori_protocol::ClientEvent::TurnLifecycle(
-                        nori_protocol::TurnLifecycle::Aborted {
-                            reason: nori_protocol::TurnAbortReason::Interrupted,
-                        },
-                    ),
-                )
-                .await;
             }
             Op::ExecApproval {
                 id: call_id,
@@ -283,7 +273,6 @@ impl AcpBackend {
                         text: SUMMARIZATION_PROMPT.to_string(),
                         display_text: None,
                         images: Vec::new(),
-                        queue_drain: nori_protocol::session_runtime::QueueDrainOutcome::LeaveQueued,
                     },
                 ),
             ))

@@ -36,7 +36,8 @@ pub enum SessionPhase {
 }
 
 /// Flattened view of session phase for TUI consumption.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionPhaseView {
     Idle,
     Loading,
@@ -150,6 +151,8 @@ pub struct PersistedSessionState {
     pub plan: Option<PlanSnapshot>,
     pub tool_calls: HashMap<String, ToolSnapshot>,
     pub available_commands: Vec<AgentCommandInfo>,
+    pub current_mode: Option<String>,
+    pub config_options: Vec<acp::SessionConfigOption>,
 }
 
 /// A finalized message in the transcript.
@@ -186,22 +189,6 @@ pub struct QueuedPrompt {
     pub text: String,
     pub display_text: Option<String>,
     pub images: Vec<acp::ContentBlock>,
-    pub queue_drain: QueueDrainOutcome,
-}
-
-// ---------------------------------------------------------------------------
-// Queue drain policy
-// ---------------------------------------------------------------------------
-
-/// What to do with the next queued prompt after a turn completes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueueDrainOutcome {
-    /// Send the next queued prompt as a new `session/prompt`.
-    SendNextPrompt,
-    /// Surface the next queued prompt for editing in the composer.
-    RestoreForEditing,
-    /// Leave all queued prompts in the queue.
-    LeaveQueued,
 }
 
 // ---------------------------------------------------------------------------

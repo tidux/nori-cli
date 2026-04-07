@@ -7,6 +7,8 @@ use serde::Serialize;
 
 pub mod session_runtime;
 
+pub use sacp::schema::StopReason;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum ClientEvent {
@@ -14,7 +16,11 @@ pub enum ClientEvent {
     ApprovalRequest(ApprovalRequest),
     MessageDelta(MessageDelta),
     PlanSnapshot(PlanSnapshot),
-    TurnLifecycle(TurnLifecycle),
+    SessionPhaseChanged(session_runtime::SessionPhaseView),
+    PromptCompleted(PromptCompleted),
+    LoadCompleted,
+    QueueChanged(QueueChanged),
+    ContextCompacted(ContextCompacted),
     ReplayEntry(ReplayEntry),
     AgentCommandsUpdate(AgentCommandsUpdate),
     Warning(WarningInfo),
@@ -25,6 +31,25 @@ pub enum ClientEvent {
 #[serde(rename_all = "snake_case")]
 pub struct WarningInfo {
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PromptCompleted {
+    pub stop_reason: acp::StopReason,
+    pub last_agent_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct QueueChanged {
+    pub prompts: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextCompacted {
+    pub summary: Option<String>,
 }
 
 /// A set of commands advertised by the ACP agent.
@@ -42,32 +67,6 @@ pub struct AgentCommandInfo {
     pub name: String,
     pub description: String,
     pub input_hint: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnLifecycle {
-    Started,
-    Completed {
-        last_agent_message: Option<String>,
-    },
-    Aborted {
-        reason: TurnAbortReason,
-    },
-    ContextCompacted {
-        summary: Option<String>,
-    },
-    /// `session/cancel` has been sent but the prompt response has not yet
-    /// arrived. The turn is still active per ACP protocol.
-    Cancelling,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnAbortReason {
-    Interrupted,
-    Replaced,
-    Other(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1093,9 +1092,17 @@ mod tests {
         assert_eq!(approval.options.len(), 2);
     }
 
+    fn seed_tool_call(normalizer: &mut ClientEventNormalizer, call_id: &str) {
+        let _ = normalizer.push_session_update(&acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+            acp::ToolCallId::new(call_id),
+            "Terminal",
+        )));
+    }
+
     #[test]
     fn normalizer_extracts_execute_invocation_and_output_text() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-exec");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-exec"),
@@ -1133,8 +1140,52 @@ mod tests {
     }
 
     #[test]
+    fn normalizer_emits_snapshot_for_unknown_tool_call_update() {
+        let mut normalizer = ClientEventNormalizer::default();
+
+        let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new("tool-exec-orphan"),
+            acp::ToolCallUpdateFields::new()
+                .title("Terminal")
+                .kind(acp::ToolKind::Execute)
+                .status(acp::ToolCallStatus::Completed)
+                .raw_input(serde_json::json!({
+                    "command": "git status",
+                }))
+                .raw_output(serde_json::json!({
+                    "stdout": "On branch spec\n",
+                })),
+        ));
+
+        let events = normalizer.push_session_update(&update);
+        assert_eq!(events.len(), 1);
+
+        let ClientEvent::ToolSnapshot(snapshot) = &events[0] else {
+            panic!("expected tool snapshot");
+        };
+
+        assert_eq!(snapshot.call_id, "tool-exec-orphan");
+        assert_eq!(snapshot.title, "Terminal");
+        assert_eq!(snapshot.kind, ToolKind::Execute);
+        assert_eq!(snapshot.phase, ToolPhase::Completed);
+        assert_eq!(
+            snapshot.invocation,
+            Some(Invocation::Command {
+                command: "git status".into(),
+            })
+        );
+        assert_eq!(
+            snapshot.artifacts,
+            vec![Artifact::Text {
+                text: "On branch spec\n".into(),
+            }]
+        );
+    }
+
+    #[test]
     fn normalizer_extracts_read_invocation_path() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-read");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-read"),
@@ -1165,6 +1216,7 @@ mod tests {
     #[test]
     fn normalizer_extracts_codex_execute_command_from_command_array() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-exec-codex");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-exec-codex"),
@@ -1200,6 +1252,7 @@ mod tests {
     #[test]
     fn normalizer_preserves_non_shell_command_arrays() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-exec-array");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-exec-array"),
@@ -1230,6 +1283,7 @@ mod tests {
     #[test]
     fn normalizer_extracts_codex_read_path_from_parsed_command() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-read-codex");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-read-codex"),
@@ -1267,6 +1321,7 @@ mod tests {
     #[test]
     fn normalizer_extracts_codex_read_path_from_later_parsed_command_entry() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-read-codex-later");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-read-codex-later"),
@@ -1309,6 +1364,7 @@ mod tests {
     #[test]
     fn normalizer_extracts_codex_list_files_from_parsed_command() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-list-codex");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-list-codex"),
@@ -1345,6 +1401,7 @@ mod tests {
     #[test]
     fn normalizer_extracts_codex_search_from_later_parsed_command_entry() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-search-codex-later");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-search-codex-later"),
@@ -1388,6 +1445,7 @@ mod tests {
     #[test]
     fn normalizer_extracts_codex_search_from_parsed_command() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-search-codex");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-search-codex"),
@@ -1537,18 +1595,6 @@ mod tests {
     }
 
     #[test]
-    fn turn_lifecycle_event_round_trips_through_serde() {
-        let event = ClientEvent::TurnLifecycle(TurnLifecycle::ContextCompacted {
-            summary: Some("Compact summary".into()),
-        });
-
-        let json = serde_json::to_string(&event).unwrap();
-        let parsed: ClientEvent = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed, event);
-    }
-
-    #[test]
     fn replay_entry_event_round_trips_through_serde() {
         let event = ClientEvent::ReplayEntry(ReplayEntry::AssistantMessage {
             text: "Replayed answer".into(),
@@ -1563,6 +1609,7 @@ mod tests {
     #[test]
     fn normalizer_extracts_delete_file_operation() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-delete");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-delete"),
@@ -1598,6 +1645,7 @@ mod tests {
     #[test]
     fn normalizer_extracts_move_file_operation() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-move");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-move"),
@@ -1636,6 +1684,7 @@ mod tests {
     #[test]
     fn normalizer_extracts_generic_tool_invocation_for_fetch() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-fetch");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-fetch"),
@@ -1894,6 +1943,7 @@ mod tests {
     #[test]
     fn codex_edit_with_changes_type_add_becomes_create() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-create");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-create"),
@@ -1925,6 +1975,7 @@ mod tests {
     #[test]
     fn codex_edit_with_changes_type_delete_becomes_delete() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-delete");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-delete"),
@@ -1960,6 +2011,7 @@ mod tests {
     #[test]
     fn codex_edit_with_move_path_becomes_move() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-move");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-move"),
@@ -1996,6 +2048,7 @@ mod tests {
     #[test]
     fn codex_edit_with_null_move_path_stays_edit() {
         let mut normalizer = ClientEventNormalizer::default();
+        seed_tool_call(&mut normalizer, "tool-edit-normal");
 
         let update = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
             acp::ToolCallId::new("tool-edit-normal"),
