@@ -169,7 +169,8 @@ fn format_client_event(event: &nori_protocol::ClientEvent) -> Option<String> {
         nori_protocol::ClientEvent::MessageDelta(_)
         | nori_protocol::ClientEvent::ReplayEntry(_)
         | nori_protocol::ClientEvent::TurnLifecycle(_)
-        | nori_protocol::ClientEvent::AgentCommandsUpdate(_) => None,
+        | nori_protocol::ClientEvent::AgentCommandsUpdate(_)
+        | nori_protocol::ClientEvent::Warning(_) => None,
     }
 }
 
@@ -549,6 +550,7 @@ mod tests {
                 artifacts: vec![],
                 raw_input: None,
                 raw_output: None,
+                owner_request_id: None,
             }),
         })]);
 
@@ -578,6 +580,7 @@ mod tests {
                 }],
                 raw_input: None,
                 raw_output: None,
+                owner_request_id: None,
             }),
         })]);
 
@@ -614,6 +617,7 @@ mod tests {
                     }],
                     raw_input: None,
                     raw_output: None,
+                    owner_request_id: None,
                 }),
             }),
             TranscriptEntry::ClientEvent(ClientEventEntry {
@@ -632,6 +636,7 @@ mod tests {
                     }],
                     raw_input: None,
                     raw_output: None,
+                    owner_request_id: None,
                 }),
             }),
             TranscriptEntry::ClientEvent(ClientEventEntry {
@@ -647,6 +652,7 @@ mod tests {
                     artifacts: vec![],
                     raw_input: None,
                     raw_output: None,
+                    owner_request_id: None,
                 }),
             }),
         ]);
@@ -696,6 +702,7 @@ mod tests {
                         artifacts: vec![],
                         raw_input: None,
                         raw_output: None,
+                        owner_request_id: None,
                     },
                 ),
             }),
