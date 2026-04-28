@@ -203,7 +203,8 @@ The `SystemInfo` struct collects environment data in a background thread to avoi
 |-------|--------|
 | `git_branch` | Git repository branch name |
 | `active_skillsets` | Active skillsets from `nori-skillsets list-active` (one name per line; returns all skillsets active for the current directory). Empty vec if the command is unavailable or fails. |
-| `git_lines_added` / `git_lines_removed` | Git diff statistics relative to the merge-base with the default branch (PR-like stats) |
+| `git_lines_added` / `git_lines_removed` | Git working tree statistics relative to `HEAD` for tracked files |
+| `git_has_untracked` | Whether untracked, non-ignored files are present |
 | `is_worktree` | Whether CWD is a git worktree |
 | `worktree_name` | Last path component of CWD when parent directory is `.worktrees`; used to display the immutable worktree directory identifier in the footer |
 | `transcript_location` | Discovered transcript path and token usage when running within an agent environment |
@@ -211,15 +212,11 @@ The `SystemInfo` struct collects environment data in a background thread to avoi
 
 The `transcript_location` field includes both `token_usage` (total tokens) and `token_breakdown` (detailed input/output/cached breakdown) which are displayed in the TUI footer when Nori runs as a nested agent inside Claude Code, Codex, or Gemini.
 
-**Git Diff Base Resolution** (`system_info.rs: resolve_diff_base()`):
-
-The git diff stats are computed against the merge-base with the default branch, so they reflect what a PR would show rather than only uncommitted changes. The resolution order is:
-1. `origin/HEAD` via `git symbolic-ref` -- detects the remote's default branch name
-2. Falls back to checking if local `main` or `master` branches exist
-3. Computes `git merge-base HEAD <branch>` to find the common ancestor
-4. Falls back to `HEAD` if no default branch can be resolved (shows only uncommitted changes)
-
-Untracked files (via `git ls-files --others --exclude-standard`) are also counted: their line counts are added to the insertion total. Binary files (non-UTF-8) are silently skipped. This means the statusline stats include new files that haven't been `git add`ed yet.
+The footer git stats are intentionally scoped to uncommitted tracked-file
+changes so the statusline stays compact in long-lived branches or repositories
+with large histories. Untracked, non-ignored files render as a compact red `!`
+alert instead of contributing line counts. The `/diff` command still produces a
+PR-like diff when users ask for the full change context.
 
 Two collection methods are provided:
 - `collect_for_directory()` - Basic collection without first-message matching (test-only)
