@@ -316,11 +316,11 @@ impl ClientToolCell {
         }
 
         // Render diff content from artifacts or invocation
-        let diff_changes = diff_changes_from_artifacts(&self.snapshot.artifacts);
+        let diff_changes = diff_changes_from_artifacts(&self.snapshot.artifacts, &self.cwd);
         let changes = if !diff_changes.is_empty() {
             diff_changes
         } else {
-            changes_from_invocation(&self.snapshot.invocation)
+            changes_from_invocation(&self.snapshot.invocation, &self.cwd)
         };
 
         if !changes.is_empty() {
@@ -658,6 +658,7 @@ fn extract_error_text(snapshot: &nori_protocol::ToolSnapshot) -> Option<String> 
 
 pub(crate) fn diff_changes_from_artifacts(
     artifacts: &[nori_protocol::Artifact],
+    cwd: &std::path::Path,
 ) -> std::collections::HashMap<std::path::PathBuf, codex_core::protocol::FileChange> {
     let mut changes = std::collections::HashMap::new();
     for artifact in artifacts {
@@ -667,7 +668,12 @@ pub(crate) fn diff_changes_from_artifacts(
                     content: change.new_text.clone(),
                 },
                 Some(old_text) => codex_core::protocol::FileChange::Update {
-                    unified_diff: diffy::create_patch(old_text, &change.new_text).to_string(),
+                    unified_diff: codex_core::util::create_patch_with_context(
+                        &change.path,
+                        cwd,
+                        old_text,
+                        &change.new_text,
+                    ),
                     move_path: None,
                 },
             };
@@ -679,6 +685,7 @@ pub(crate) fn diff_changes_from_artifacts(
 
 pub(crate) fn changes_from_invocation(
     invocation: &Option<nori_protocol::Invocation>,
+    cwd: &std::path::Path,
 ) -> std::collections::HashMap<std::path::PathBuf, codex_core::protocol::FileChange> {
     let mut changes = std::collections::HashMap::new();
     match invocation.as_ref() {
@@ -689,7 +696,12 @@ pub(crate) fn changes_from_invocation(
                         content: change.new_text.clone(),
                     },
                     Some(old_text) => codex_core::protocol::FileChange::Update {
-                        unified_diff: diffy::create_patch(old_text, &change.new_text).to_string(),
+                        unified_diff: codex_core::util::create_patch_with_context(
+                            &change.path,
+                            cwd,
+                            old_text,
+                            &change.new_text,
+                        ),
                         move_path: None,
                     },
                 };

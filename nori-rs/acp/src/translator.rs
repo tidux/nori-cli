@@ -705,6 +705,7 @@ pub fn is_patch_operation(
 pub fn tool_call_to_file_change(
     kind: Option<&acp::ToolKind>,
     raw_input: Option<&serde_json::Value>,
+    cwd: &std::path::Path,
 ) -> Option<(PathBuf, FileChange)> {
     let input = raw_input?;
     let file_path = extract_file_path(Some(input))?;
@@ -737,8 +738,9 @@ pub fn tool_call_to_file_change(
     let old_string = input.get("old_string").and_then(|v| v.as_str())?;
     let new_string = input.get("new_string").and_then(|v| v.as_str())?;
 
-    // Generate unified diff using diffy
-    let unified_diff = diffy::create_patch(old_string, new_string).to_string();
+    // Generate unified diff using diffy with file context if available
+    let unified_diff =
+        codex_core::util::create_patch_with_context(&path, cwd, old_string, new_string);
 
     Some((
         path,
@@ -755,6 +757,7 @@ pub fn tool_call_to_file_change(
 /// patch approval UI in the TUI instead of the generic exec approval.
 pub fn permission_request_to_patch_approval_event(
     request: &acp::RequestPermissionRequest,
+    cwd: &std::path::Path,
 ) -> Option<ApplyPatchApprovalRequestEvent> {
     let kind = request.tool_call.fields.kind.as_ref();
     let raw_input = request.tool_call.fields.raw_input.as_ref();
@@ -764,7 +767,7 @@ pub fn permission_request_to_patch_approval_event(
         return None;
     }
 
-    let (path, change) = tool_call_to_file_change(kind, raw_input)?;
+    let (path, change) = tool_call_to_file_change(kind, raw_input, cwd)?;
 
     let mut changes = HashMap::new();
     changes.insert(path, change);
@@ -1237,7 +1240,11 @@ mod tests {
             "new_string": "fn new() {\n    println!(\"hello\");\n}"
         });
 
-        let result = tool_call_to_file_change(Some(&acp::ToolKind::Edit), Some(&input));
+        let result = tool_call_to_file_change(
+            Some(&acp::ToolKind::Edit),
+            Some(&input),
+            std::path::Path::new("."),
+        );
         assert!(result.is_some());
 
         let (path, change) = result.unwrap();
@@ -1259,13 +1266,81 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_call_to_file_change_edit_with_context() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("test.txt");
+        let content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+        std::fs::write(&file_path, content).unwrap();
+
+        let input = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_string": "line 3\n",
+            "new_string": "line 3 modified\n"
+        });
+
+        // Use the temp dir as cwd
+        let result =
+            tool_call_to_file_change(Some(&acp::ToolKind::Edit), Some(&input), temp_dir.path());
+        assert!(result.is_some());
+
+        let (_, change) = result.unwrap();
+        if let FileChange::Update { unified_diff, .. } = change {
+            // The diff should show line 3, not line 1
+            assert!(
+                unified_diff.contains("@@ -1,5 +1,5 @@")
+                    || unified_diff.contains("@@ -1,4 +1,4 @@")
+                    || unified_diff.contains("-line 3")
+                    || unified_diff.contains("line 2")
+            );
+
+            // Wait, if it uses the whole file, it should have the correct line numbers.
+            // For a 5 line file, it might still show @@ -1,5 +1,5 @@ if the whole file is context.
+            // Let's use a larger file to be sure.
+
+            let large_content = (1..=100).map(|i| format!("line {i}\n")).collect::<String>();
+            std::fs::write(&file_path, &large_content).unwrap();
+
+            let input2 = serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "old_string": "line 50\n",
+                "new_string": "line 50 modified\n"
+            });
+
+            let result2 = tool_call_to_file_change(
+                Some(&acp::ToolKind::Edit),
+                Some(&input2),
+                temp_dir.path(),
+            );
+            let (_, change2) = result2.unwrap();
+            if let FileChange::Update { unified_diff, .. } = change2 {
+                // The diff should contain line 50
+                assert!(unified_diff.contains("-line 50"));
+                assert!(unified_diff.contains("+line 50 modified"));
+                // And the hunk header should NOT be @ -1,x +1,x
+                assert!(!unified_diff.contains("@@ -1,"));
+                // It should be adjusted to line 50
+                assert!(
+                    unified_diff.contains("@@ -50 +50 @@")
+                        || unified_diff.contains("@@ -50,1 +50,1 @@")
+                );
+            }
+        } else {
+            panic!("Expected FileChange::Update");
+        }
+    }
+
+    #[test]
     fn test_tool_call_to_file_change_write() {
         let input = serde_json::json!({
             "file_path": "/src/new_file.rs",
             "content": "// New file\nfn main() {}\n"
         });
 
-        let result = tool_call_to_file_change(Some(&acp::ToolKind::Edit), Some(&input));
+        let result = tool_call_to_file_change(
+            Some(&acp::ToolKind::Edit),
+            Some(&input),
+            std::path::Path::new("."),
+        );
         assert!(result.is_some());
 
         let (path, change) = result.unwrap();
@@ -1286,7 +1361,11 @@ mod tests {
             "content": "// File to delete\n"
         });
 
-        let result = tool_call_to_file_change(Some(&acp::ToolKind::Delete), Some(&input));
+        let result = tool_call_to_file_change(
+            Some(&acp::ToolKind::Delete),
+            Some(&input),
+            std::path::Path::new("."),
+        );
         assert!(result.is_some());
 
         let (path, change) = result.unwrap();
@@ -1306,7 +1385,11 @@ mod tests {
             "content": "some content"
         });
 
-        let result = tool_call_to_file_change(Some(&acp::ToolKind::Edit), Some(&input));
+        let result = tool_call_to_file_change(
+            Some(&acp::ToolKind::Edit),
+            Some(&input),
+            std::path::Path::new("."),
+        );
         assert!(result.is_none());
     }
 
@@ -1330,7 +1413,7 @@ mod tests {
             vec![],
         );
 
-        let event = permission_request_to_patch_approval_event(&request);
+        let event = permission_request_to_patch_approval_event(&request, std::path::Path::new("."));
         assert!(event.is_some());
 
         let event = event.unwrap();
@@ -1365,7 +1448,7 @@ mod tests {
             vec![],
         );
 
-        let event = permission_request_to_patch_approval_event(&request);
+        let event = permission_request_to_patch_approval_event(&request, std::path::Path::new("."));
         assert!(event.is_none());
     }
 
@@ -1503,7 +1586,7 @@ mod tests {
             vec![],
         );
 
-        let event = permission_request_to_patch_approval_event(&request);
+        let event = permission_request_to_patch_approval_event(&request, std::path::Path::new("."));
         assert!(event.is_some());
 
         let event = event.unwrap();

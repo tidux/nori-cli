@@ -1,5 +1,61 @@
 use tracing::debug;
 
+pub fn create_patch_with_context(
+    path: &std::path::Path,
+    cwd: &std::path::Path,
+    old_text: &str,
+    new_text: &str,
+) -> String {
+    let full_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    let line_offset = if let Ok(file_content) = std::fs::read_to_string(&full_path) {
+        if let Some(offset) = file_content.find(old_text) {
+            Some(file_content[..offset].lines().count() + 1)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let patch = diffy::create_patch(old_text, new_text).to_string();
+    if let Some(offset) = line_offset
+        && offset > 1
+    {
+        return adjust_patch_line_numbers(&patch, offset);
+    }
+    patch
+}
+
+fn adjust_patch_line_numbers(patch: &str, line_offset: usize) -> String {
+    let re = regex::Regex::new(r"^@@ -(\d+)(,?\d*) \+(\d+)(,?\d*) @@").unwrap();
+    let mut result = String::new();
+    for line in patch.lines() {
+        if let Some(caps) = re.captures(line) {
+            let old_start: usize = caps[1].parse().unwrap_or(1);
+            let new_start: usize = caps[3].parse().unwrap_or(1);
+            let old_rest = &caps[2];
+            let new_rest = &caps[4];
+
+            let adjusted_old_start = old_start + line_offset - 1;
+            let adjusted_new_start = new_start + line_offset - 1;
+
+            result.push_str(&format!(
+                "@@ -{}{}{} +{}{}{} @@\n",
+                adjusted_old_start, old_rest, "", adjusted_new_start, new_rest, ""
+            ));
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    result
+}
+
 pub(crate) fn try_parse_error_message(text: &str) -> String {
     debug!("Parsing server error response: {}", text);
     let json = serde_json::from_str::<serde_json::Value>(text).unwrap_or_default();
