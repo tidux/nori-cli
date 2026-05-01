@@ -13,11 +13,9 @@ pub fn create_patch_with_context(
     };
 
     let line_offset = if let Ok(file_content) = std::fs::read_to_string(&full_path) {
-        if let Some(offset) = file_content.find(old_text) {
-            Some(file_content[..offset].lines().count() + 1)
-        } else {
-            None
-        }
+        file_content
+            .find(old_text)
+            .map(|offset| file_content[..offset].lines().count() + 1)
     } else {
         None
     };
@@ -32,7 +30,9 @@ pub fn create_patch_with_context(
 }
 
 fn adjust_patch_line_numbers(patch: &str, line_offset: usize) -> String {
-    let re = regex::Regex::new(r"^@@ -(\d+)(,?\d*) \+(\d+)(,?\d*) @@").unwrap();
+    let Ok(re) = regex::Regex::new(r"^@@ -(\d+)(,?\d*) \+(\d+)(,?\d*) @@") else {
+        return patch.to_string();
+    };
     let mut result = String::new();
     for line in patch.lines() {
         if let Some(caps) = re.captures(line) {
@@ -45,8 +45,7 @@ fn adjust_patch_line_numbers(patch: &str, line_offset: usize) -> String {
             let adjusted_new_start = new_start + line_offset - 1;
 
             result.push_str(&format!(
-                "@@ -{}{}{} +{}{}{} @@\n",
-                adjusted_old_start, old_rest, "", adjusted_new_start, new_rest, ""
+                "@@ -{adjusted_old_start}{old_rest} +{adjusted_new_start}{new_rest} @@\n",
             ));
         } else {
             result.push_str(line);
