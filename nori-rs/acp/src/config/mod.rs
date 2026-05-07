@@ -10,6 +10,8 @@ pub use loader::CONFIG_FILE;
 pub use loader::NORI_HOME_DIR;
 pub use loader::NORI_HOME_ENV;
 pub use loader::find_nori_home;
+pub use types::AcpProxyConfig;
+pub use types::AcpProxyConfigToml;
 pub use types::AgentConfigToml;
 pub use types::AgentDistributionToml;
 pub use types::ApprovalPolicy;
@@ -123,6 +125,7 @@ animations = false
 terminal_notifications = "disabled"
 os_notifications = "disabled"
 vertical_footer = true
+custom_working_messages = false
 "#;
         let config: NoriConfigToml = toml::from_str(toml_str).unwrap();
 
@@ -139,6 +142,7 @@ vertical_footer = true
         );
         assert_eq!(config.tui.os_notifications, Some(OsNotifications::Disabled));
         assert_eq!(config.tui.vertical_footer, Some(true));
+        assert_eq!(config.tui.custom_working_messages, Some(false));
     }
 
     #[test]
@@ -154,6 +158,7 @@ model = "gemini"
 [tui]
 animations = false
 vertical_footer = true
+custom_working_messages = false
 "#,
         )
         .unwrap();
@@ -168,6 +173,7 @@ vertical_footer = true
         ); // default
         assert_eq!(config.os_notifications, OsNotifications::Enabled); // default
         assert!(config.vertical_footer);
+        assert!(!config.custom_working_messages);
     }
 
     #[test]
