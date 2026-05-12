@@ -1269,61 +1269,28 @@ mod tests {
     fn test_tool_call_to_file_change_edit_with_context() {
         let temp_dir = tempfile::tempdir().unwrap();
         let file_path = temp_dir.path().join("test.txt");
-        let content = "line 1\nline 2\nline 3\nline 4\nline 5\n";
+        let content = (1..=100).map(|i| format!("line {i}\n")).collect::<String>();
         std::fs::write(&file_path, content).unwrap();
 
         let input = serde_json::json!({
             "path": file_path.to_str().unwrap(),
-            "old_string": "line 3\n",
-            "new_string": "line 3 modified\n"
+            "old_string": "line 50\n",
+            "new_string": "line 50 modified\n"
         });
 
-        // Use the temp dir as cwd
         let result =
             tool_call_to_file_change(Some(&acp::ToolKind::Edit), Some(&input), temp_dir.path());
         assert!(result.is_some());
 
         let (_, change) = result.unwrap();
         if let FileChange::Update { unified_diff, .. } = change {
-            // The diff should show line 3, not line 1
+            assert!(unified_diff.contains("-line 50"));
+            assert!(unified_diff.contains("+line 50 modified"));
             assert!(
-                unified_diff.contains("@@ -1,5 +1,5 @@")
-                    || unified_diff.contains("@@ -1,4 +1,4 @@")
-                    || unified_diff.contains("-line 3")
-                    || unified_diff.contains("line 2")
+                unified_diff.contains("@@ -50 +50 @@")
+                    || unified_diff.contains("@@ -50,1 +50,1 @@"),
+                "expected contextual hunk header for line 50, got:\n{unified_diff}"
             );
-
-            // Wait, if it uses the whole file, it should have the correct line numbers.
-            // For a 5 line file, it might still show @@ -1,5 +1,5 @@ if the whole file is context.
-            // Let's use a larger file to be sure.
-
-            let large_content = (1..=100).map(|i| format!("line {i}\n")).collect::<String>();
-            std::fs::write(&file_path, &large_content).unwrap();
-
-            let input2 = serde_json::json!({
-                "path": file_path.to_str().unwrap(),
-                "old_string": "line 50\n",
-                "new_string": "line 50 modified\n"
-            });
-
-            let result2 = tool_call_to_file_change(
-                Some(&acp::ToolKind::Edit),
-                Some(&input2),
-                temp_dir.path(),
-            );
-            let (_, change2) = result2.unwrap();
-            if let FileChange::Update { unified_diff, .. } = change2 {
-                // The diff should contain line 50
-                assert!(unified_diff.contains("-line 50"));
-                assert!(unified_diff.contains("+line 50 modified"));
-                // And the hunk header should NOT be @ -1,x +1,x
-                assert!(!unified_diff.contains("@@ -1,"));
-                // It should be adjusted to line 50
-                assert!(
-                    unified_diff.contains("@@ -50 +50 @@")
-                        || unified_diff.contains("@@ -50,1 +50,1 @@")
-                );
-            }
         } else {
             panic!("Expected FileChange::Update");
         }
