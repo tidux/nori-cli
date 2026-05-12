@@ -15,6 +15,7 @@ pub fn create_patch_with_context(
     let line_offset = if let Ok(file_content) = std::fs::read_to_string(&full_path) {
         file_content
             .find(old_text)
+            .or_else(|| file_content.find(new_text))
             .map(|offset| file_content[..offset].lines().count() + 1)
     } else {
         None
@@ -73,6 +74,33 @@ pub(crate) fn try_parse_error_message(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn create_patch_with_context_uses_new_text_when_file_is_already_updated() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let file_path = temp_dir.path().join("story.txt");
+        let file_content = (1..=100)
+            .map(|line| {
+                if line == 50 {
+                    "line 50 updated\n".to_string()
+                } else {
+                    format!("line {line}\n")
+                }
+            })
+            .collect::<String>();
+        std::fs::write(&file_path, file_content).expect("write updated file");
+
+        let patch = create_patch_with_context(
+            std::path::Path::new("story.txt"),
+            temp_dir.path(),
+            "line 50\n",
+            "line 50 updated\n",
+        );
+
+        let hunk_header = patch.lines().find(|line| line.starts_with("@@ "));
+        assert_eq!(hunk_header, Some("@@ -50 +50 @@"));
+    }
 
     #[test]
     fn test_try_parse_error_message() {
